@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timezone
 import time
 import re
+import json
 
 # Load secrets from environment
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
@@ -15,15 +16,18 @@ FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
     "https://venturebeat.com/category/ai/feed/",
+    # Add more feeds as needed
 ]
 
 # Keywords for relevance
 KEYWORDS = [
     'AI', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network',
-    'LLM', 'large language model', 'generative AI', 'computer vision', 'machine vision',
-    'image recognition', 'object detection', 'anomaly detection', 'predictive maintenance',
-    'condition monitoring', 'failure prediction', 'smart factory', 'Industry 4.0', 'IIoT',
-    'industrial', 'automation', 'robot', 'robotics', 'quality control', 'defect', 'inspection'
+    'LLM', 'large language model', 'generative AI', 'computer vision', 'object detection',
+    'anomaly detection', 'predictive maintenance', 'condition monitoring', 'failure prediction',
+    'smart factory', 'Industry 4.0', 'IIoT', 'digital twin', 'simulation', 'edge AI',
+    'robot', 'robotics', 'automation', 'autonomous', 'cobots', 'collaborative robot',
+    'AMR', 'AGV', 'quality control', 'defect detection', 'visual inspection',
+    'process optimization', 'downtime reduction', 'energy optimization', 'factory', 'plant'
 ]
 
 def is_relevant(text):
@@ -35,68 +39,61 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-
-# ------------------------------------------------------
-# OPENROUTER SUMMARIZER WITH RETRIES (FIXED)
-# ------------------------------------------------------
 def summarize_article(article_text):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "HTTP-Referer": "https://github.com/barbararomeira/ai-manufacturing-digest",
-        "X-Title": "AI Manufacturing Digest"
+        "HTTP-Referer": "https://github.com/yourusername/ai-manufacturing-digest",
+        "X-Title": "AI Use Case Extractor"
     }
+    prompt = (
+        "You are an expert industrial analyst. From the article below, extract all AI use cases in manufacturing.\n"
+        "For each use case, return in the following structured format (JSON):\n\n"
+        "[\n"
+        "  {\n"
+        "    \"title\": \"Short descriptive title\",\n"
+        "    \"problem\": \"Problem the AI solves\",\n"
+        "    \"ai_solution\": \"AI technique(s) used\",\n"
+        "    \"category\": \"Manufacturing | Logistic | Supply Chain\",\n"
+        "    \"industry\": \"Automotive | Food | etc.\",\n"
+        "    \"source\": \"<article URL>\",\n"
+        "    \"date\": \"<publication date ISO format>\"\n"
+        "  }\n"
+        "]\n\n"
+        "If there is no valid AI manufacturing use case, return an empty array.\n\n"
+        f"Article:\n{article_text}"
+    )
 
     payload = {
-        "model": "openai/gpt-4o-mini",
-        "messages": [{
-            "role": "user",
-            "content": (
-                "You are an expert industrial analyst. Summarize ONLY concrete applications of AI, "
-                "machine learning, or automation in manufacturing from the article below. Include: "
-                "1) AI technique used, 2) manufacturing process, 3) outcome. "
-                "If there is no manufacturing use case, reply: \"Not a valid manufacturing AI use case.\"\n\n"
-                "Article:\n" + article_text
-            )
-        }],
-        "max_tokens": 250
+        "model": "mistralai/mistral-7b-instruct:free",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 500
     }
 
-    for attempt in range(3):
-        try:
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=30
-            )
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+        if response.status_code == 200:
+            content = response.json()['choices'][0]['message']['content'].strip()
+            try:
+                data = json.loads(content)
+                if isinstance(data, list) and data:
+                    return data
+                return []
+            except json.JSONDecodeError:
+                print("❌ Failed to parse JSON from summarization output")
+                return []
+        else:
+            print(f"Summarization failed: {response.status_code} - {response.text}")
+            return []
+    except Exception as e:
+        print(f"Error summarizing: {e}")
+        return []
 
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip()
-                if "Not a valid manufacturing AI use case" in content:
-                    return None
-                return content
-
-            elif response.status_code in (429, 500, 503):
-                wait = 5 * (attempt + 1)
-                print(f"⚠️ OpenRouter rate limit/server error ({response.status_code}). Retrying in {wait}s…")
-                time.sleep(wait)
-                continue
-
-            else:
-                print(f"❌ Summarization failed: {response.status_code} - {response.text}")
-                return None
-
-        except Exception as e:
-            print(f"Error summarizing: {e}")
-            time.sleep(5)
-
-    return None
-
-
-# ------------------------------------------------------
-# NOTION WRITER
-# ------------------------------------------------------
-def add_to_notion(title, summary, url, pub_date):
+def add_to_notion(use_case):
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
@@ -105,14 +102,16 @@ def add_to_notion(title, summary, url, pub_date):
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
-            "Title": {"title": [{"text": {"content": title[:199]}}]},
-            "Source": {"url": url},
-            "Date": {"date": {"start": pub_date[:10]}},
-            "Industry": {"multi_select": [{"name": "Manufacturing"}]},
-            "Category": {"multi_select": [{"name": "AI in Manufacturing"}]},
-            "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]}
+            "Title": {"title": [{"text": {"content": use_case.get("title","")[:199]}}]},
+            "Problem": {"rich_text": [{"text": {"content": use_case.get("problem","")[:2000]}}]},
+            "AI Solution": {"rich_text": [{"text": {"content": use_case.get("ai_solution","")[:2000]}}]},
+            "Category": {"multi_select": [{"name": use_case.get("category","Unknown")}]},
+            "Industry": {"multi_select": [{"name": use_case.get("industry","Unknown")}]},
+            "Source": {"url": use_case.get("source","")},
+            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}}
         }
     }
+
     try:
         response = requests.post(
             "https://api.notion.com/v1/pages",
@@ -120,25 +119,18 @@ def add_to_notion(title, summary, url, pub_date):
             headers=headers
         )
         if response.status_code == 200:
-            print(f"✅ Added: {title}")
+            print(f"✅ Added: {use_case.get('title')}")
         else:
             print(f"❌ Notion error: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"Error posting to Notion: {e}")
 
-
-
-# ------------------------------------------------------
-# MAIN LOOP
-# ------------------------------------------------------
 def main():
     seen_urls = set()
-
     for feed_url in FEEDS:
         try:
             feed = feedparser.parse(feed_url)
-
-            for entry in feed.entries[:5]:  # limit per feed
+            for entry in feed.entries[:5]:
                 if entry.link in seen_urls:
                     continue
                 seen_urls.add(entry.link)
@@ -146,33 +138,35 @@ def main():
                 title = entry.get('title', 'No Title')
                 desc = entry.get('summary', '')
                 content = entry.get('content', [{}])[0].get('value', '')
-                text = clean_text(desc + " " + content)
+                text = clean_text(desc + ' ' + content)
 
-                if not is_relevant(title + " " + text):
+                if not is_relevant(title + ' ' + text):
+                    print(f"⏭️ Skipping (not relevant): {title}")
                     continue
+
                 if len(text) < 100:
+                    print(f"⏭️ Skipping (too short): {title}")
                     continue
 
-                print(f"🔎 Processing: {title[:60]} | Length {len(text)} chars")
-
-                summary = summarize_article(text)
-                if not summary:
-                    print(f"⏭️ Skipping (not relevant or failed): {title}")
+                print(f"🔎 Processing: {title} | Length {len(text)} chars")
+                use_cases = summarize_article(text)
+                if not use_cases:
+                    print(f"⏭️ No valid use cases found: {title}")
                     continue
 
-                pub_date = entry.get('published', "")
-                if not pub_date or 'T' not in pub_date:
+                pub_date = entry.get('published', datetime.now(timezone.utc).isoformat())
+                if 'T' not in pub_date:
                     pub_date = datetime.now(timezone.utc).isoformat()
 
-                print(f"📤 Sending to Notion → {title}")
-                add_to_notion(title, summary, entry.link, pub_date)
-
-                time.sleep(3)  # Lower delay because we use a paid model
+                for uc in use_cases:
+                    uc["source"] = entry.link
+                    uc["date"] = pub_date
+                    print(f"📤 Sending to Notion → {uc.get('title')}")
+                    add_to_notion(uc)
+                    time.sleep(12)  # Respect rate limits
 
         except Exception as e:
             print(f"Error processing feed {feed_url}: {e}")
 
-
 if __name__ == "__main__":
     main()
-
