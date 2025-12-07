@@ -1,5 +1,12 @@
 import os
 import sys
+import feedparser
+import requests
+from datetime import datetime, timezone
+import time
+import re
+import json
+
 
 # Load OpenRouter key
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
@@ -24,15 +31,6 @@ if not NOTION_DATABASE_ID:
     sys.exit(1)
 else:
     print("✅ NOTION_DATABASE_ID loaded correctly.")
-
-
-import os
-import feedparser
-import requests
-from datetime import datetime, timezone
-import time
-import re
-import json
 
 # =======================
 # Load secrets from environment
