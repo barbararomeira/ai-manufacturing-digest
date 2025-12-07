@@ -1,4 +1,32 @@
 import os
+import sys
+
+# Load OpenRouter key
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+
+# Quick validation
+if not OPENROUTER_KEY:
+    print("❌ OPENROUTER_KEY not found! Please check your GitHub Secrets and workflow.")
+    sys.exit(1)
+else:
+    print("✅ OPENROUTER_KEY loaded correctly.")
+
+if not NOTION_TOKEN:
+    print("❌ NOTION_TOKEN not found! Please check your GitHub Secrets and workflow.")
+    sys.exit(1)
+else:
+    print("✅ NOTION_TOKEN loaded correctly.")
+
+if not NOTION_DATABASE_ID:
+    print("❌ NOTION_DATABASE_ID not found! Please check your GitHub Secrets and workflow.")
+    sys.exit(1)
+else:
+    print("✅ NOTION_DATABASE_ID loaded correctly.")
+
+
+import os
 import feedparser
 import requests
 from datetime import datetime, timezone
