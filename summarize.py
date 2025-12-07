@@ -102,19 +102,17 @@ def add_to_notion(title, summary, url, pub_date):
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
-
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
             "Title": {"title": [{"text": {"content": title[:199]}}]},
             "Source": {"url": url},
             "Date": {"date": {"start": pub_date[:10]}},
-            "Industry": {"select": {"name": "Manufacturing"}},
-            "Category": {"select": {"name": "AI in Manufacturing"}},
+            "Industry": {"multi_select": [{"name": "Manufacturing"}]},
+            "Category": {"multi_select": [{"name": "AI in Manufacturing"}]},
             "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]}
         }
     }
-
     try:
         response = requests.post(
             "https://api.notion.com/v1/pages",
@@ -122,11 +120,12 @@ def add_to_notion(title, summary, url, pub_date):
             headers=headers
         )
         if response.status_code == 200:
-            print(f"✅ Added to Notion: {title}")
+            print(f"✅ Added: {title}")
         else:
-            print(f"❌ Notion error {response.status_code}: {response.text}")
+            print(f"❌ Notion error: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"Error posting to Notion: {e}")
+
 
 
 # ------------------------------------------------------
