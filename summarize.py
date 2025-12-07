@@ -135,7 +135,8 @@ def main():
                 clean = clean_text(text)
                 if len(clean) < 100:
                     continue
-
+               
+                print(f"✅ Processing: {title[:50]}... | Length: {len(clean)}")
                 summary = summarize_article(clean)
                 if not summary:
                     continue
@@ -145,6 +146,7 @@ def main():
                 if 'T' not in pub_date:
                     pub_date = datetime.now(timezone.utc).isoformat()
 
+                print(f"📤 Sending to Notion: {title}")
                 add_to_notion(title, summary, entry.link, pub_date)
                 time.sleep(12)  # Respect OpenRouter rate limit
 
