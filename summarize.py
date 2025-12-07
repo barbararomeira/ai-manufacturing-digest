@@ -4,10 +4,9 @@ import re
 import json
 import time
 from datetime import datetime, timezone
-
-# Hugging Face / Transformers imports
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import requests
 import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # ==============================
 # Notion Config
@@ -35,13 +34,14 @@ KEYWORDS = [
 ]
 
 # ==============================
-# Local Model Setup
+# Local Model Setup (CPU-friendly)
 # ==============================
-MODEL_NAME = "mistralai/mistral-7b-instruct"
+MODEL_NAME = "tiiuae/falcon-7b-instruct"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     device_map="auto",
+    load_in_4bit=True,
     torch_dtype=torch.float16
 )
 
@@ -57,8 +57,7 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def chunk_text(text, max_tokens=2000):
-    """Split long text into chunks for local model inference"""
+def chunk_text(text, max_tokens=500):
     words = text.split()
     chunks = []
     current = []
@@ -76,20 +75,18 @@ def chunk_text(text, max_tokens=2000):
 
 def summarize_chunk(chunk_text, article_url, pub_date):
     prompt = (
-        "You are an expert industrial analyst. From the article below, extract all AI use cases in manufacturing.\n"
-        "Return each use case as JSON with the following fields:\n"
-        "title, problem, ai_solution, category (Manufacturing/Logistic/Supply Chain), industry (Automotive/Food/etc.), source, date\n"
+        "You are an expert industrial analyst. Extract all AI use cases in manufacturing.\n"
+        "Return JSON array of use cases with fields: title, problem, ai_solution, category (Manufacturing/Logistic/Supply Chain), "
+        "industry (Automotive/Food/etc.), source, date.\n"
         f"Article:\n{chunk_text}\n"
     )
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+    inputs = tokenizer(prompt, return_tensors="pt").to("cuda" if torch.cuda.is_available() else "cpu")
     outputs = model.generate(**inputs, max_new_tokens=500)
     text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Ensure JSON compliance
+
     try:
         data = json.loads(text_output)
         if isinstance(data, list):
-            # Fill missing source/date
             for uc in data:
                 uc.setdefault("source", article_url)
                 uc.setdefault("date", pub_date)
@@ -99,8 +96,6 @@ def summarize_chunk(chunk_text, article_url, pub_date):
     return []
 
 def add_to_notion(use_case):
-    """Add one AI Use Case to Notion database"""
-    import requests
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
@@ -156,14 +151,13 @@ def main():
                     pub_date = datetime.now(timezone.utc).isoformat()
 
                 print(f"🔎 Processing: {title} | Length {len(text)}")
-                
-                # Chunk long articles
-                chunks = chunk_text(text, max_tokens=2000)
+
+                chunks = chunk_text(text, max_tokens=500)
                 all_use_cases = []
                 for chunk in chunks:
                     use_cases = summarize_chunk(chunk, entry.link, pub_date)
                     all_use_cases.extend(use_cases)
-                    time.sleep(1)  # avoid GPU overload
+                    time.sleep(1)
 
                 if not all_use_cases:
                     print(f"⏭️ No valid use cases found: {title}")
@@ -178,6 +172,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
