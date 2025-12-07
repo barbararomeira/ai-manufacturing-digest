@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 import requests
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ==============================
 # Notion Config
@@ -34,16 +34,14 @@ KEYWORDS = [
 ]
 
 # ==============================
-# Local Model Setup (CPU-friendly)
+# Load Flan-T5-Small
 # ==============================
-MODEL_NAME = "tiiuae/falcon-7b-instruct"
+MODEL_NAME = "google/flan-t5-small"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    device_map="auto",
-    load_in_4bit=True,
-    torch_dtype=torch.float16
-)
+model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model.to(device)
 
 # ==============================
 # Helper Functions
@@ -57,30 +55,22 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def chunk_text(text, max_tokens=500):
+def chunk_text(text, max_words=300):
     words = text.split()
     chunks = []
-    current = []
-    tokens = 0
-    for w in words:
-        current.append(w)
-        tokens += 1
-        if tokens >= max_tokens:
-            chunks.append(' '.join(current))
-            current = []
-            tokens = 0
-    if current:
-        chunks.append(' '.join(current))
+    for i in range(0, len(words), max_words):
+        chunks.append(' '.join(words[i:i+max_words]))
     return chunks
 
 def summarize_chunk(chunk_text, article_url, pub_date):
     prompt = (
-        "You are an expert industrial analyst. Extract all AI use cases in manufacturing.\n"
-        "Return JSON array of use cases with fields: title, problem, ai_solution, category (Manufacturing/Logistic/Supply Chain), "
-        "industry (Automotive/Food/etc.), source, date.\n"
-        f"Article:\n{chunk_text}\n"
+        "Extract all AI use cases in manufacturing from the text below. "
+        "Return a JSON array of objects with fields: "
+        "title, problem, ai_solution, category (Manufacturing/Logistic/Supply Chain), "
+        "industry (Automotive/Food/etc.), source, date.\n\n"
+        f"Article:\n{chunk_text}"
     )
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda" if torch.cuda.is_available() else "cpu")
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
     outputs = model.generate(**inputs, max_new_tokens=500)
     text_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
@@ -152,7 +142,7 @@ def main():
 
                 print(f"🔎 Processing: {title} | Length {len(text)}")
 
-                chunks = chunk_text(text, max_tokens=500)
+                chunks = chunk_text(text, max_words=300)
                 all_use_cases = []
                 for chunk in chunks:
                     use_cases = summarize_chunk(chunk, entry.link, pub_date)
@@ -172,9 +162,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
 '''
 import os
