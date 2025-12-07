@@ -14,18 +14,25 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
-    "https://techcrunch.com/tag/artificial-intelligence/feed/",
     "https://venturebeat.com/category/ai/feed/",
-    "https://www.supplychaindive.com/feeds/news/",
     # Add more (avoid vercel-protected ones like theautomateddaily.com)
 ]
 
 # Keywords for relevance (broad but focused)
 KEYWORDS = [
-    'AI', 'artificial intelligence', 'machine learning', 'robot', 'automation',
-    'computer vision', 'predictive maintenance', 'smart factory', 'Industry 4.0',
-    'IIoT', 'quality control', 'defect detection', 'digital twin', 'manufactur',
-    'factory', 'production', 'industrial', 'CNC', 'PLC', 'SCADA'
+    'AI', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network',
+    'LLM', 'large language model', 'generative AI', 'computer vision', 'machine vision',
+    'image recognition', 'object detection', 'anomaly detection', 'predictive maintenance',
+    'condition monitoring', 'failure prediction', 'smart factory', 'Industry 4.0', 'IIoT',
+    'Industrial IoT', 'digital twin', 'simulation', 'edge AI', 'robot', 'robotics',
+    'automation', 'autonomous', 'cobots', 'collaborative robot', 'AMR', 'AGV',
+    'quality control', 'quality assurance', 'defect detection', 'visual inspection',
+    'scrap reduction', 'yield improvement', 'process optimization', 'cycle time reduction',
+    'downtime reduction', 'energy optimization', 'manufactur', 'factory', 'production',
+    'plant', 'assembly line', 'workcell', 'industrial', 'CNC', 'PLC', 'SCADA', 'MES',
+    'ERP', 'MTConnect', 'OPC UA', 'Siemens', 'Rockwell', 'ABB', 'Fanuc', 'KUKA',
+    'Cognex', 'Keyence', 'NVIDIA', 'predictive analytics', 'time-series forecasting',
+    'root cause analysis', 'traceability', 'lean manufacturing', 'OEE'
 ]
 
 def is_relevant(text):
