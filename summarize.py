@@ -14,14 +14,11 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# Quick validation
 if not OPENROUTER_KEY or not NOTION_TOKEN or not NOTION_DATABASE_ID:
-    print("❌ Missing environment variables. Please check GitHub Secrets.")
+    print("❌ Missing environment variables")
     sys.exit(1)
-
-print("✅ OPENROUTER_KEY loaded correctly.")
-print("✅ NOTION_TOKEN loaded correctly.")
-print("✅ NOTION_DATABASE_ID loaded correctly.")
+else:
+    print("✅ Environment variables loaded")
 
 # =======================
 # RSS feeds
@@ -43,14 +40,13 @@ KEYWORDS = [
     'robot', 'robotics', 'automation', 'autonomous', 'cobots', 'collaborative robot',
     'AMR', 'AGV', 'quality control', 'defect detection', 'visual inspection',
     'process optimization', 'downtime reduction', 'energy optimization', 'factory', 'plant',
-    # Expanded keywords
-    'manufacturing technology', 'industrial automation', 'supply chain AI', 
-    'predictive analytics', 'industrial IoT', 'smart manufacturing', 
-    'digital transformation', 'production efficiency', 'maintenance AI', 'logistics AI'
+    'manufacturing', 'production', 'industrial', 'supply chain', 'logistics', 'MES', 'ERP',
+    'digital manufacturing', 'smart manufacturing', 'predictive analytics', 'AI deployment',
+    'automation system', 'industrial AI', 'AI solution'
 ]
 
 # =======================
-# Helper functions
+# Helpers
 # =======================
 def is_relevant(text):
     text = text.lower()
@@ -61,72 +57,129 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def chunk_text(text, max_chars=4000):
-    text = text.strip()
-    return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+def chunk_text(text, chunk_size=4000, overlap=2000):
+    words = text.split()
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_size, len(words))
+        chunks.append(" ".join(words[start:end]))
+        if end == len(words):
+            break
+        start = start + chunk_size - overlap
+    return chunks
 
 # =======================
-# Summarize article via Mistral
+# Summarize article with Mistral 7B
 # =======================
-def summarize_article(article_text):
+def call_model(prompt):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "HTTP-Referer": "https://github.com/yourusername/ai-manufacturing-digest",
-        "X-Title": "AI Use Case Extractor"
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "mistralai/mistral-7b-instruct:free",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 800
     }
 
-    chunks = chunk_text(article_text)
-    all_use_cases = []
-
-    for idx, chunk in enumerate(chunks, start=1):
-        print(f"  ➤ Model chunk {idx}/{len(chunks)} ...")
-        prompt = (
-            "You are an expert industrial analyst. From the article below, extract the most relevant AI use case in manufacturing.\n"
-            "If there are multiple, pick the most important one and mention in a 'comment' field that other use cases exist.\n"
-            "Return JSON with fields: title, problem, ai_solution, category, industry, source, date, comment.\n"
-            "If no valid AI manufacturing use case exists, return an empty array.\n\n"
-            f"Article:\n{chunk}"
-        )
-        payload = {
-            "model": "mistralai/mistral-7b-instruct:latest",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 500
-        }
-
+    for attempt in range(5):
         try:
-            response = requests.post(
+            resp = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=60
             )
-
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip()
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, list) and data:
-                        all_use_cases.extend(data)
-                except json.JSONDecodeError:
-                    print("❌ Failed to parse JSON from model output")
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"].strip()
+            elif resp.status_code == 429:
+                wait = (2 ** attempt) * 5
+                print(f"⚠️ Rate limit hit. Waiting {wait}s before retry...")
+                time.sleep(wait)
+                continue
             else:
-                print(f"❌ Model call failed {response.status_code}: {response.text}")
+                print(f"❌ Model call failed {resp.status_code}: {resp.text}")
+                return None
         except Exception as e:
-            print(f"❌ Error summarizing chunk: {e}")
+            print(f"❌ Model call error: {e}")
+            time.sleep(5)
+    return None
 
-        time.sleep(5)  # avoid rate limits
+def parse_json_safe(content):
+    try:
+        return json.loads(content)
+    except:
+        try:
+            # extract array if extra text
+            clean = re.search(r"\[.*\]", content, flags=re.DOTALL)
+            if clean:
+                return json.loads(clean.group())
+        except:
+            # log for debugging
+            with open("debug_model_output.txt", "a") as f:
+                f.write(content + "\n\n")
+    return []
 
-    # Return only the first use case but keep comment if more exist
+def summarize_article(article_text, url, pub_date):
+    chunks = chunk_text(article_text)
+    all_use_cases = []
+
+    for idx, chunk in enumerate(chunks):
+        prompt = f"""
+You are an expert industrial analyst. Extract AI use cases in manufacturing from the article chunk below.
+Return **only JSON array**. Each use case must have:
+- title
+- problem
+- ai_solution
+- category: Manufacturing | Logistic | Supply Chain
+- industry
+- source (article URL)
+- date (ISO format)
+If no valid use case exists, return [].
+
+Article chunk {idx+1} of {len(chunks)}:
+{chunk}
+"""
+        output = call_model(prompt)
+        if not output:
+            print(f"❌ Chunk {idx+1} failed or returned invalid data")
+            continue
+        data = parse_json_safe(output)
+        if isinstance(data, list):
+            for uc in data:
+                uc["source"] = url
+                uc["date"] = pub_date
+            all_use_cases.extend(data)
+        else:
+            print(f"❌ Chunk {idx+1} returned non-list JSON")
+
+    # fallback last resort
+    if not all_use_cases:
+        fallback_chunk = " ".join(article_text.split()[:2000])
+        fallback_prompt = f"""
+Extract AI use cases in manufacturing from this text. Return only JSON array.
+{text}
+"""
+        output = call_model(fallback_prompt)
+        data = parse_json_safe(output)
+        if isinstance(data, list):
+            for uc in data:
+                uc["source"] = url
+                uc["date"] = pub_date
+            all_use_cases.extend(data)
+
     if all_use_cases:
-        main_use_case = all_use_cases[0]
+        primary_uc = all_use_cases[0]
         if len(all_use_cases) > 1:
-            main_use_case['comment'] = f"Additional {len(all_use_cases)-1} use cases exist; check source for details."
-        return [main_use_case]
-
+            primary_uc["comment"] = f"Article contains {len(all_use_cases)} use cases. Check source for others."
+        else:
+            primary_uc["comment"] = ""
+        return [primary_uc]
     return []
 
 # =======================
-# Add to Notion
+# Post to Notion
 # =======================
 def add_to_notion(use_case):
     headers = {
@@ -134,7 +187,6 @@ def add_to_notion(use_case):
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
-
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
@@ -148,31 +200,29 @@ def add_to_notion(use_case):
             "Comment": {"rich_text": [{"text": {"content": use_case.get("comment","")}}]}
         }
     }
-
     try:
-        response = requests.post(
+        resp = requests.post(
             "https://api.notion.com/v1/pages",
-            json=payload,
-            headers=headers
+            headers=headers,
+            json=payload
         )
-        if response.status_code == 200:
+        if resp.status_code == 200:
             print(f"✅ Added: {use_case.get('title')}")
         else:
-            print(f"❌ Notion error: {response.status_code} - {response.text}")
+            print(f"❌ Notion error {resp.status_code}: {resp.text}")
     except Exception as e:
-        print(f"❌ Error posting to Notion: {e}")
-
+        print(f"❌ Notion post exception: {e}")
 
 # =======================
-# Main function
+# Main loop
 # =======================
 def main():
     seen_urls = set()
     for feed_url in FEEDS:
-        print(f"📡 Fetching feed: {feed_url}")
         try:
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:5]:  # limit for testing
+            print(f"📡 Fetching feed: {feed_url}")
+            for entry in feed.entries[:5]:
                 if entry.link in seen_urls:
                     continue
                 seen_urls.add(entry.link)
@@ -180,9 +230,9 @@ def main():
                 title = entry.get('title', 'No Title')
                 desc = entry.get('summary', '')
                 content = entry.get('content', [{}])[0].get('value', '')
-                text = clean_text(desc + ' ' + content)
+                text = clean_text(desc + " " + content)
 
-                if not is_relevant(title + ' ' + text):
+                if not is_relevant(title + " " + text):
                     print(f"⏭️ Not relevant: {title}")
                     continue
                 if len(text) < 100:
@@ -190,21 +240,20 @@ def main():
                     continue
 
                 print(f"🔎 Processing article: {title} ({len(text)} chars)")
-                use_cases = summarize_article(text)
-                if not use_cases:
-                    print(f"⏭️ No valid use case found: {title}")
-                    continue
-
                 pub_date = entry.get('published', datetime.now(timezone.utc).isoformat())
                 if 'T' not in pub_date:
                     pub_date = datetime.now(timezone.utc).isoformat()
 
+                use_cases = summarize_article(text, entry.link, pub_date)
+                if not use_cases:
+                    print(f"⏭️ No valid use case found: {title}")
+                    continue
+
                 for uc in use_cases:
-                    uc["source"] = entry.link
-                    uc["date"] = pub_date
                     print(f"📤 Sending to Notion → {uc.get('title')}")
                     add_to_notion(uc)
-                    time.sleep(12)  # respect rate limits
+                    time.sleep(12)  # rate limit
+
         except Exception as e:
             print(f"❌ Error processing feed {feed_url}: {e}")
 
