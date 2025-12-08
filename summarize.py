@@ -144,7 +144,7 @@ def add_to_notion(use_case):
             "Category": {"multi_select": [{"name": use_case.get("category","Unknown")}]},
             "Industry": {"multi_select": [{"name": use_case.get("industry","Unknown")}]},
             "Source": {"url": use_case.get("source","")},
-            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}}},
+            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}},
             "Comment": {"rich_text": [{"text": {"content": use_case.get("comment","")}}]}
         }
     }
@@ -161,6 +161,7 @@ def add_to_notion(use_case):
             print(f"❌ Notion error: {response.status_code} - {response.text}")
     except Exception as e:
         print(f"❌ Error posting to Notion: {e}")
+
 
 # =======================
 # Main function
