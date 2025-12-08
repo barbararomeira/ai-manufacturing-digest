@@ -8,6 +8,7 @@ on:
 jobs:
   summarize:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Increased to 30 minutes to allow for multiple feeds & chunks
     steps:
       - uses: actions/checkout@v4
 
@@ -26,4 +27,7 @@ jobs:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python summarize.py
+        run: |
+          # Ensure script is executable
+          chmod +x summarize.py
+          python summarize.py
