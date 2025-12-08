@@ -1,202 +1,153 @@
+#!/usr/bin/env python3
 import os
-import sys
+import time
+import json
 import feedparser
 import requests
-from datetime import datetime, timezone
-import time
-import re
-import json
+from bs4 import BeautifulSoup
+import html
 
-# =======================
-# Load environment variables
-# =======================
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-
-for var, name in [(OPENROUTER_KEY, "OPENROUTER_KEY"), (NOTION_TOKEN, "NOTION_TOKEN"), (NOTION_DATABASE_ID, "NOTION_DATABASE_ID")]:
-    if not var:
-        print(f"❌ {name} not found! Exiting.")
-        sys.exit(1)
-    else:
-        print(f"✅ {name} loaded correctly.")
-
-# =======================
-# Config
-# =======================
+# ------------------- CONFIG -------------------
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
 FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
-    "https://venturebeat.com/category/ai/feed/",
+    "https://venturebeat.com/category/ai/feed/"
 ]
+MODEL_ID = "mistral/mistral-7b-instruct"  # OpenRouter-compatible model
+CHUNK_SIZE = 4000  # characters per chunk
+MAX_RETRIES = 5
+RETRY_BACKOFF = 5  # seconds
 
-KEYWORDS = [
-    'AI', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network',
-    'LLM', 'large language model', 'generative AI', 'computer vision', 'object detection',
-    'anomaly detection', 'predictive maintenance', 'condition monitoring', 'failure prediction',
-    'smart factory', 'Industry 4.0', 'IIoT', 'digital twin', 'simulation', 'edge AI',
-    'robot', 'robotics', 'automation', 'autonomous', 'cobots', 'collaborative robot',
-    'AMR', 'AGV', 'quality control', 'defect detection', 'visual inspection',
-    'process optimization', 'downtime reduction', 'energy optimization', 'factory', 'plant',
-    'manufacturing process', 'industrial AI', 'industrial automation', 'smart manufacturing',
-    'production efficiency', 'maintenance AI', 'supply chain optimization', 'predictive analytics'
-]
+HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_KEY}",
+    "Content-Type": "application/json"
+}
 
-MAX_CHUNK_SIZE = 3000   # Approx characters per chunk for Mistral
-MAX_CHUNKS_PER_ARTICLE = 5
-MAX_RETRIES = 3
-INITIAL_WAIT = 5
-MAX_WAIT = 20
-ARTICLE_LIMIT_PER_FEED = 3
+# ------------------- HELPERS -------------------
+def clean_article(text):
+    """Remove HTML tags and decode entities"""
+    soup = BeautifulSoup(text, "html.parser")
+    clean_text = soup.get_text(separator=" ")
+    clean_text = html.unescape(clean_text)
+    return clean_text.strip()
 
-# =======================
-# Helper functions
-# =======================
-def is_relevant(text):
-    text = text.lower()
-    return any(kw.lower() in text for kw in KEYWORDS)
+def chunk_text(text, size=CHUNK_SIZE):
+    """Split text into chunks"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end
+    return chunks
 
-def clean_text(text):
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-def chunk_text(text, size=MAX_CHUNK_SIZE):
-    return [text[i:i+size] for i in range(0, len(text), size)]
-
-# =======================
-# Summarization with Mistral
-# =======================
-def summarize_chunk(chunk, url, pub_date):
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "HTTP-Referer": "https://github.com/yourusername/ai-manufacturing-digest",
-        "X-Title": "AI Use Case Extractor"
-    }
-
-    prompt = (
-        "You are an expert industrial analyst. Extract AI use cases in manufacturing.\n"
-        "Return only **one most relevant use case** per chunk in JSON:\n"
-        "- title\n- problem\n- ai_solution\n- category: Manufacturing | Logistic | Supply Chain\n"
-        "- industry\n- source: article URL\n- date: publication date in ISO format\n"
-        "If no valid use case exists, return an empty array.\n\n"
-        f"Article chunk:\n{chunk}"
-    )
-
-    payload = {
-        "model": "mistralai/mistral-7b-instruct:latest",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500
-    }
-
-    retries = 0
-    wait_time = INITIAL_WAIT
-    while retries < MAX_RETRIES:
+def call_model(prompt):
+    """Call OpenRouter model with retry and rate limit handling"""
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = requests.post("https://openrouter.ai/api/v1/chat/completions",
-                                     headers=headers, json=payload, timeout=30)
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip()
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, list) and data:
-                        for uc in data:
-                            uc["source"] = url
-                            uc["date"] = pub_date
-                        return data
-                    return []
-                except json.JSONDecodeError:
-                    print("❌ Failed to parse JSON from chunk")
-                    return []
-            elif response.status_code == 429:
-                print(f"⚠️ Rate limit hit. Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
-                wait_time = min(wait_time*2, MAX_WAIT)
-                retries += 1
-            else:
-                print(f"❌ API error: {response.status_code} - {response.text}")
-                return []
+            data = {
+                "model": MODEL_ID,
+                "input": prompt,
+                "max_output_tokens": 500
+            }
+            response = requests.post(
+                "https://api.openrouter.ai/v1/completions",
+                headers=HEADERS,
+                data=json.dumps(data),
+                timeout=60
+            )
+            if response.status_code == 429:
+                backoff = RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"⚠️ Rate limit hit. Waiting {backoff}s before retry...")
+                time.sleep(backoff)
+                continue
+            response.raise_for_status()
+            result = response.json()
+            output_text = result.get("completion", "").strip()
+            return output_text
         except Exception as e:
-            print(f"❌ Exception: {e}")
-            return []
-    return []
+            print(f"❌ Model call error on attempt {attempt}: {e}")
+            time.sleep(RETRY_BACKOFF)
+    return None
 
-# =======================
-# Notion insertion
-# =======================
-def add_to_notion(use_case):
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
-    }
-
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Title": {"title": [{"text": {"content": use_case.get("title","")[:199]}}]},
-            "Problem": {"rich_text": [{"text": {"content": use_case.get("problem","")[:2000]}}]},
-            "AI Solution": {"rich_text": [{"text": {"content": use_case.get("ai_solution","")[:2000]}}]},
-            "Category": {"multi_select": [{"name": use_case.get("category","Unknown")}]},
-            "Industry": {"multi_select": [{"name": use_case.get("industry","Unknown")}]},
-            "Source": {"url": use_case.get("source","")},
-            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}}
-        }
-    }
-
+def parse_json_safe(text):
+    """Try to parse JSON, return None if fails"""
     try:
-        response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload)
-        if response.status_code == 200:
-            print(f"✅ Added to Notion: {use_case.get('title')}")
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+def summarize_article(title, text):
+    """Split article into chunks, send to model, combine results"""
+    text = clean_article(text)
+    chunks = chunk_text(text)
+    summaries = []
+    for i, chunk in enumerate(chunks):
+        print(f"  ➤ Model chunk {i+1}/{len(chunks)} ...")
+        prompt = f"""
+You are an AI assistant. Summarize the following article chunk.
+Return ONLY a JSON object in this format:
+
+{{
+  "title": "<article title>",
+  "summary": "<short summary of use case or key point>",
+  "keywords": ["keyword1", "keyword2"]
+}}
+
+Article chunk:
+{chunk}
+"""
+        output = call_model(prompt)
+        if not output:
+            print(f"  ❌ Chunk {i+1} failed or returned invalid data")
+            continue
+        data = parse_json_safe(output)
+        if data:
+            summaries.append(data)
         else:
-            print(f"❌ Notion error: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"❌ Error posting to Notion: {e}")
+            print(f"  ❌ Failed to parse JSON from chunk")
+    if summaries:
+        # Merge summaries into one
+        merged = {
+            "title": title,
+            "summary": " ".join([s["summary"] for s in summaries if "summary" in s]),
+            "keywords": list({kw for s in summaries if "keywords" in s for kw in s["keywords"]})
+        }
+        return merged
+    return None
 
-# =======================
-# Main
-# =======================
+def is_relevant(text):
+    """Simple relevance filter based on keywords"""
+    keywords = ["manufacturing", "AI", "automation", "industrial", "robotics", "machine learning"]
+    text_lower = text.lower()
+    return any(k.lower() in text_lower for k in keywords)
+
+# ------------------- MAIN -------------------
 def main():
-    seen_urls = set()
+    if not (OPENROUTER_KEY and NOTION_TOKEN and NOTION_DATABASE_ID):
+        print("❌ Missing environment variables!")
+        return
+
+    print("✅ Environment variables loaded")
     for feed_url in FEEDS:
-        print(f"📡 Fetching feed: {feed_url}")
         try:
+            print(f"📡 Fetching feed: {feed_url}")
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:ARTICLE_LIMIT_PER_FEED]:
-                url = entry.link
-                if url in seen_urls:
-                    continue
-                seen_urls.add(url)
-
-                title = entry.get('title', 'No Title')
-                desc = entry.get('summary', '')
-                content = entry.get('content', [{}])[0].get('value', '')
-                text = clean_text(desc + ' ' + content)
-
-                if not is_relevant(title + ' ' + text) or len(text) < 100:
+            for entry in feed.entries:
+                title = entry.get("title", "No title")
+                text = entry.get("content", [{"value": entry.get("summary", "")}])[0]["value"]
+                if not is_relevant(title + " " + text):
                     print(f"⏭️ Skipping: {title}")
                     continue
-
-                pub_date = entry.get('published', datetime.now(timezone.utc).isoformat())
-                if 'T' not in pub_date:
-                    pub_date = datetime.now(timezone.utc).isoformat()
-
                 print(f"🔎 Processing article: {title} ({len(text)} chars)")
-                chunks = chunk_text(text)
-                all_use_cases = []
-
-                for idx, chunk in enumerate(chunks[:MAX_CHUNKS_PER_ARTICLE]):
-                    print(f"  ➤ Model chunk {idx+1}/{len(chunks[:MAX_CHUNKS_PER_ARTICLE])} ...")
-                    uc = summarize_chunk(chunk, url, pub_date)
-                    if uc:
-                        all_use_cases.extend(uc)
-                        break  # take **first valid use case only**
-
-                if all_use_cases:
-                    add_to_notion(all_use_cases[0])
+                summary_data = summarize_article(title, text)
+                if summary_data:
+                    print(f"✅ Summary found: {summary_data}")
                 else:
                     print(f"⏭️ No valid use case found: {title}")
-
         except Exception as e:
             print(f"❌ Error processing feed {feed_url}: {e}")
 
