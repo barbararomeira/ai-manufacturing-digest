@@ -8,7 +8,7 @@ on:
 jobs:
   summarize:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Increased to 60 minutes to allow for multiple feeds & chunks
+    timeout-minutes: 60  # increase timeout for long runs
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install feedparser requests
+          pip install feedparser requests beautifulsoup4 html5lib
 
       - name: Run summarizer
         env:
@@ -28,6 +28,5 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
-          # Ensure script is executable
           chmod +x summarize.py
           python summarize.py
