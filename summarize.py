@@ -6,31 +6,30 @@ from datetime import datetime, timezone
 import time
 import re
 import json
+from math import ceil
 
 # =======================
-# Load environment variables (GitHub Secrets)
+# Load environment variables
 # =======================
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")  # OpenRouter API key for Mistral
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")      # Notion integration token
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")  # Notion database ID
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# =======================
-# Quick validation of secrets
-# =======================
+# Quick validation
 if not OPENROUTER_KEY:
-    print("❌ OPENROUTER_KEY not found! Exiting.")
+    print("❌ OPENROUTER_KEY not found! Please check your GitHub Secrets and workflow.")
     sys.exit(1)
 else:
     print("✅ OPENROUTER_KEY loaded correctly.")
 
 if not NOTION_TOKEN:
-    print("❌ NOTION_TOKEN not found! Exiting.")
+    print("❌ NOTION_TOKEN not found! Please check your GitHub Secrets and workflow.")
     sys.exit(1)
 else:
     print("✅ NOTION_TOKEN loaded correctly.")
 
 if not NOTION_DATABASE_ID:
-    print("❌ NOTION_DATABASE_ID not found! Exiting.")
+    print("❌ NOTION_DATABASE_ID not found! Please check your GitHub Secrets and workflow.")
     sys.exit(1)
 else:
     print("✅ NOTION_DATABASE_ID loaded correctly.")
@@ -45,7 +44,7 @@ FEEDS = [
 ]
 
 # =======================
-# Keywords for relevance
+# Keywords for filtering relevant articles
 # =======================
 KEYWORDS = [
     'AI', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network',
@@ -55,45 +54,49 @@ KEYWORDS = [
     'robot', 'robotics', 'automation', 'autonomous', 'cobots', 'collaborative robot',
     'AMR', 'AGV', 'quality control', 'defect detection', 'visual inspection',
     'process optimization', 'downtime reduction', 'energy optimization', 'factory', 'plant',
-    'manufacturing innovation', 'production improvement', 'industrial AI', 'AI application'
+    'manufacturing innovation', 'production efficiency', 'industrial AI', 'AI deployment', 'industrial automation'
 ]
 
 # =======================
-# Utility: check if article contains relevant keywords
+# Helper functions
 # =======================
 def is_relevant(text):
     text = text.lower()
     return any(kw.lower() in text for kw in KEYWORDS)
 
-# =======================
-# Utility: clean text by removing HTML and extra spaces
-# =======================
 def clean_text(text):
     text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
-    text = re.sub(r'\s+', ' ', text)     # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text)     # Remove extra whitespace
     return text.strip()
 
-# =======================
-# Split long text into chunks (~3000 chars) for the model
-# =======================
-def chunk_text(text, max_chars=3000):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + max_chars
-        # Try to break at last sentence if possible
-        if end < len(text):
-            period_pos = text.rfind('.', start, end)
-            if period_pos != -1:
-                end = period_pos + 1
-        chunks.append(text[start:end].strip())
-        start = end
-    return chunks
+def chunk_text(text, max_chars=2000):
+    """Split text into manageable chunks"""
+    text = text.strip()
+    return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+
+def parse_model_output(content):
+    """Clean and parse JSON from model output"""
+    content = re.sub(r"```json(.*?)```", r"\1", content, flags=re.DOTALL)
+    content = re.sub(r"```(.*?)```", r"\1", content, flags=re.DOTALL)
+    content = content.strip()
+    try:
+        data = json.loads(content)
+        if isinstance(data, list):
+            return data
+        return None
+    except json.JSONDecodeError:
+        match = re.search(r"(\[.*\])", content, flags=re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except:
+                return None
+        return None
 
 # =======================
-# Summarize a single chunk using Mistral 7B
+# Summarize a single chunk
 # =======================
-def summarize_chunk(chunk, article_url):
+def summarize_chunk(chunk_text, article_url, pub_date):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "HTTP-Referer": "https://github.com/yourusername/ai-manufacturing-digest",
@@ -101,25 +104,24 @@ def summarize_chunk(chunk, article_url):
     }
 
     prompt = (
-        "You are an expert industrial analyst. From the article below, extract the most relevant AI use case in manufacturing.\n"
-        "If multiple use cases exist, pick the most relevant one and note in a 'comment' field that other use cases may exist.\n"
-        "Return exactly one JSON object with the fields:\n"
+        "You are an expert industrial analyst. From the article below, extract the most relevant AI use case "
+        "in manufacturing or industrial applications. Return exactly ONE use case as a JSON object with fields:\n"
         "- title: short descriptive title\n"
         "- problem: problem the AI solves\n"
         "- ai_solution: AI technique(s) used\n"
         "- category: Manufacturing | Logistic | Supply Chain\n"
         "- industry: Automotive | Food | etc.\n"
         "- source: article URL\n"
-        "- date: publication date in ISO format\n"
-        "- comment: optional comment\n\n"
-        f"Article URL: {article_url}\n"
-        f"Article Content:\n{chunk}"
+        "- date: publication date in ISO format\n\n"
+        f"Article:\n{chunk_text}\n"
+        f"URL: {article_url}\nDate: {pub_date}\n\n"
+        "Return only JSON. If no use case exists, return {}."
     )
 
     payload = {
         "model": "mistralai/mistral-7b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500
+        "max_tokens": 1800
     }
 
     try:
@@ -127,17 +129,14 @@ def summarize_chunk(chunk, article_url):
             "https://openrouter.ai/api/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=60
+            timeout=90
         )
         if response.status_code == 200:
             content = response.json()['choices'][0]['message']['content'].strip()
-            try:
-                data = json.loads(content)
-                if isinstance(data, dict):
-                    return data
-                print("❌ Model returned invalid JSON format (expected dict)")
-                return None
-            except json.JSONDecodeError:
+            data = parse_model_output(content)
+            if data:
+                return data
+            else:
                 print("❌ Failed to parse JSON from model output")
                 return None
         else:
@@ -148,15 +147,16 @@ def summarize_chunk(chunk, article_url):
         return None
 
 # =======================
-# Add a single use case to Notion
+# Add use case to Notion
 # =======================
 def add_to_notion(use_case):
+    if not use_case:
+        return
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
-
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
@@ -166,16 +166,14 @@ def add_to_notion(use_case):
             "Category": {"multi_select": [{"name": use_case.get("category","Unknown")}]},
             "Industry": {"multi_select": [{"name": use_case.get("industry","Unknown")}]},
             "Source": {"url": use_case.get("source","")},
-            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}},
-            "Comment": {"rich_text": [{"text": {"content": use_case.get("comment","")[:2000]}}]}
+            "Date": {"date": {"start": use_case.get("date", datetime.now(timezone.utc).isoformat())[:10]}}
         }
     }
-
     try:
         response = requests.post(
             "https://api.notion.com/v1/pages",
-            json=payload,
-            headers=headers
+            headers=headers,
+            json=payload
         )
         if response.status_code == 200:
             print(f"✅ Added to Notion: {use_case.get('title')}")
@@ -185,72 +183,69 @@ def add_to_notion(use_case):
         print(f"❌ Exception posting to Notion: {e}")
 
 # =======================
-# Process a single article
+# Process a full article (chunk if necessary)
 # =======================
-def process_article(entry):
-    title = entry.get('title', 'No Title')
-    desc = entry.get('summary', '')
-    content = entry.get('content', [{}])[0].get('value', '')
-    text = clean_text(desc + ' ' + content)
+def summarize_article(article_text, article_url, pub_date):
+    chunks = chunk_text(article_text, max_chars=2000)
+    best_use_case = None
 
-    if not is_relevant(title + " " + text):
-        print(f"⏭️ Not relevant: {title}")
-        return
-
-    if len(text) < 100:
-        print(f"⏭️ Too short: {title}")
-        return
-
-    print(f"🔎 Processing article: {title} ({len(text)} chars)")
-
-    # Split article into chunks
-    chunks = chunk_text(text)
-    all_use_cases = []
-    for i, chunk in enumerate(chunks):
-        print(f"  ➤ Model chunk {i+1}/{len(chunks)} ...")
-        uc = summarize_chunk(chunk, entry.link)
-        if uc:
-            all_use_cases.append(uc)
+    for idx, chunk in enumerate(chunks):
+        print(f"  ➤ Model chunk {idx+1}/{len(chunks)} ...")
+        result = summarize_chunk(chunk, article_url, pub_date)
+        if result:
+            # Option A: Take first non-empty valid use case
+            best_use_case = result
+            break
         else:
-            print(f"  ❌ Chunk {i+1} failed or returned invalid data")
+            print(f"  ❌ Chunk {idx+1} failed or returned invalid data")
 
-    if not all_use_cases:
-        print(f"⏭️ No valid use case found: {title}")
-        return
-
-    # Option A: pick most relevant use case from chunks
-    main_use_case = all_use_cases[0]
-    if len(all_use_cases) > 1:
-        main_use_case['comment'] = f"Article contains {len(all_use_cases)} use case chunks; showing primary."
-
-    # Fill Notion fields
-    main_use_case["source"] = entry.link
-    main_use_case["date"] = entry.get('published', datetime.now(timezone.utc).isoformat())
-
-    # Send to Notion
-    add_to_notion(main_use_case)
+    return best_use_case
 
 # =======================
-# Main function: iterate feeds
+# Main workflow
 # =======================
 def main():
     seen_urls = set()
     for feed_url in FEEDS:
-        print(f"\n📡 Fetching feed: {feed_url}")
         try:
+            print(f"\n📡 Fetching feed: {feed_url}")
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:5]:  # limit to latest 5 per feed
+
+            for entry in feed.entries[:5]:
                 if entry.link in seen_urls:
                     continue
                 seen_urls.add(entry.link)
-                process_article(entry)
+
+                title = entry.get("title","No Title")
+                desc = entry.get("summary","")
+                content = entry.get("content", [{}])[0].get("value", "")
+                text = clean_text(desc + " " + content)
+
+                if len(text) < 100:
+                    print(f"⏭️ Too short: {title}")
+                    continue
+                if not is_relevant(title + " " + text):
+                    print(f"⏭️ Not relevant: {title}")
+                    continue
+
+                pub_date = entry.get('published', datetime.now(timezone.utc).isoformat())
+                if 'T' not in pub_date:
+                    pub_date = datetime.now(timezone.utc).isoformat()
+
+                print(f"\n🔎 Processing article: {title} ({len(text)} chars)")
+                use_case = summarize_article(text, entry.link, pub_date)
+
+                if use_case:
+                    print(f"📤 Sending to Notion → {use_case.get('title')}")
+                    add_to_notion(use_case)
+                    time.sleep(12)  # Notion & API rate limit
+                else:
+                    print(f"⏭️ No valid use case found: {title}")
+
         except Exception as e:
             print(f"❌ Error processing feed {feed_url}: {e}")
 
     print("\n✅ Done.")
 
-# =======================
-# Entry point
-# =======================
 if __name__ == "__main__":
     main()
