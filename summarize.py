@@ -102,6 +102,17 @@ def clean_text(html_or_text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+# =======================
+# Function to check if an article is relevant based on keywords
+# =======================
+def is_relevant(text: str) -> bool:
+    """
+    Returns True if any keyword appears in the text.
+    Case-insensitive match.
+    """
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in KEYWORDS_LOWER)
+
 def chunk_text_by_chars(text: str, chunk_size: int = 4000) -> List[str]:
     """
     Split by roughly chunk_size characters, trying to split on sentence boundaries.
