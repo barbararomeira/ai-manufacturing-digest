@@ -8,6 +8,22 @@ from bs4 import BeautifulSoup
 import html
 from datetime import datetime
 
+# ------------------- SSL ADAPTER FOR HOST HEADER (Bypass DNS + Fix SSL) -------------------
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
+class HostHeaderSSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        kwargs['ssl_context'] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        # Ensure SSL cert is validated against the real hostname
+        connection_pool_kwargs = self.poolmanager.connection_pool_kw
+        connection_pool_kwargs["assert_hostname"] = "api.openrouter.ai"
+        return super().send(request, **kwargs)
+
 # ------------------- CONFIG -------------------
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
@@ -18,36 +34,30 @@ FEEDS = [
     "https://www.manufacturingdive.com/feeds/news/",
     "https://venturebeat.com/category/ai/feed/",
     "https://www.iot-worlds.com/feed/",
-    "https://www.smartindustry.com/rss/articles/"
+    "https://www.smartindustry.som/rss/articles/"
 ]
 
 MODEL = "mistral/mistral-7b-instruct"
 MAX_ARTICLES_PER_FEED = 8
 
-# Validate environment variables
 if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
     raise SystemExit("❌ Missing required environment variables")
 
 # ------------------- RELEVANCE KEYWORDS -------------------
 RELEVANCE_KEYWORDS = [
-    # Core manufacturing
     "manufactur", "factory", "industrial", "production", "plant", "assembly", "shop floor",
-    # AI & automation
     "ai ", "artificial intelligence", "machine learning", "ml ", "deep learning", "neural network",
     "computer vision", "predictive maintenance", "digital twin", "iiot", "industry 4.0",
     "smart factory", "automation", "robotics", "cobots", "agv", "autonomous mobile robot",
-    "process mining", "anomaly detection", "yield optimization",
-    # Technologies & processes
-    "cnc", "machining", "3d printing", "additive manufacturing", "quality control",
-    "defect detection", "visual inspection", "supply chain", "logistics", "warehouse automation",
-    # Industries & materials
-    "automotive", "aerospace", "semiconductor", "electronics", "pharmaceutical",
-    "food and beverage", "chemical", "metal", "steel", "plastic", "textile", "packaging"
+    "process mining", "anomaly detection", "yield optimization", "cnc", "machining", "3d printing",
+    "additive manufacturing", "quality control", "defect detection", "visual inspection",
+    "supply chain", "logistics", "warehouse automation", "automotive", "aerospace", "semiconductor",
+    "electronics", "pharmaceutical", "food and beverage", "chemical", "metal", "steel",
+    "plastic", "textile", "packaging"
 ]
 
 def is_relevant(text):
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in RELEVANCE_KEYWORDS)
+    return any(kw in text.lower() for kw in RELEVANCE_KEYWORDS)
 
 # ------------------- HELPERS -------------------
 def clean_html(raw_text):
@@ -55,29 +65,33 @@ def clean_html(raw_text):
     return html.unescape(soup.get_text(" ", strip=True))
 
 def call_llm(prompt, max_tokens=800):
+    # Use direct IP to bypass DNS resolution failures in GitHub Actions
+    OPENROUTER_IP = "104.21.84.145"  # One of api.openrouter.ai's Cloudflare IPs
+    url = f"https://{OPENROUTER_IP}/v1/chat/completions"
+
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/your-repo",
-        "X-Title": "AI Manufacturing Digest"
+        "X-Title": "AI Manufacturing Digest",
+        "Host": "api.openrouter.ai"  # Critical for Cloudflare routing
     }
+
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.4
     }
+
     try:
-        response = requests.post(
-            "https://api.openrouter.ai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=50
-        )
+        session = requests.Session()
+        session.mount("https://", HostHeaderSSLAdapter())
+        response = session.post(url, headers=headers, json=payload, timeout=50)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"⚠️ LLM error: {e}")
+        print(f"⚠️ LLM error (IP fallback): {e}")
         return None
 
 def extract_use_case(article_text, title, url):
@@ -100,7 +114,6 @@ Text:
     if not output:
         return None
     try:
-        # Remove markdown code fences
         if output.startswith("```json"):
             output = output.split("```json", 1)[1].split("```", 1)[0]
         elif output.startswith("```"):
@@ -108,7 +121,6 @@ Text:
         data = json.loads(output.strip())
         if data.get("skip"):
             return None
-        # Normalize to lists
         category = data.get("category", [])
         industry = data.get("industry", [])
         if isinstance(category, str):
@@ -138,7 +150,7 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
             "Problem": {"rich_text": [{"text": {"content": problem or "N/A"}}]},
             "AI Solution": {"rich_text": [{"text": {"content": ai_solution or "N/A"}}]},
             "Category": {"multi_select": [{"name": tag} for tag in category[:5]]},
-            "Industry": {"multi_select": [{"name": ind} for ind in industry[:5]]},  # ✅ Multi-select!
+            "Industry": {"multi_select": [{"name": ind} for ind in industry[:5]]},
             "Source": {"url": source},
             "Date": {"date": {"start": date_str}}
         }
@@ -154,7 +166,7 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
 
 # ------------------- MAIN -------------------
 def main():
-    print("🚀 Starting AI Manufacturing Use Case Extractor")
+    print("🚀 Starting AI Manufacturing Use Case Extractor (DNS Bypass Enabled)")
     processed_titles = set()
 
     for feed_url in FEEDS:
@@ -191,7 +203,7 @@ def main():
                     source=entry.link,
                     date_str=date_str
                 )
-                time.sleep(2.5)  # Respect free-tier rate limits
+                time.sleep(2.5)
 
         except Exception as e:
             print(f"💥 Error processing {feed_url}: {e}")
