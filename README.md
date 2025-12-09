@@ -101,3 +101,9 @@ Scheduled run
  - Notion API
  - OpenRouter API
  - GitHub Actions documentation
+
+## 📷 Demo
+
+Here’s a demo of the AI Manufacturing Digest in action:
+
+![AI Manufacturing Digest Demo](assets/demo.png)
