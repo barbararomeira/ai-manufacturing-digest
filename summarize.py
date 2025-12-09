@@ -9,7 +9,7 @@ import html
 from datetime import datetime
 
 # ------------------- CONFIG -------------------
-DEEPINFRA_TOKEN = os.getenv("DEEPINFRA_TOKEN", "").strip()  # Use DeepInfra instead
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
 
@@ -19,10 +19,10 @@ FEEDS = [
     "https://venturebeat.com/category/ai/feed/"
 ]
 
-MODEL = "mistralai/Mistral-7B-Instruct-v0.2"  # Free on DeepInfra
+MODEL = "mistral/mistral-7b-instruct"
 MAX_ARTICLES_PER_FEED = 6
 
-if not all([DEEPINFRA_TOKEN, NOTION_TOKEN, NOTION_DATABASE_ID]):
+if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
     raise SystemExit("❌ Missing environment variables")
 
 RELEVANCE_KEYWORDS = [
@@ -40,8 +40,10 @@ def clean_html(raw):
 
 def call_llm(prompt):
     headers = {
-        "Authorization": f"Bearer {DEEPINFRA_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/your-repo",
+        "X-Title": "AI Manufacturing Digest"
     }
     payload = {
         "model": MODEL,
@@ -49,18 +51,21 @@ def call_llm(prompt):
         "max_tokens": 800,
         "temperature": 0.3
     }
-    try:
-        resp = requests.post(
-            "https://api.deepinfra.com/v1/openai/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=50
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"⚠️ LLM error: {e}")
-        return None
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            resp = requests.post(
+                "https://api.openrouter.ai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=50
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"⚠️ LLM error (attempt {attempt+1}): {e}")
+            if attempt < 2:
+                time.sleep(5)  # Wait before retry
+    return None
 
 def extract_use_case(article_text, title, url):
     prompt = f"""
