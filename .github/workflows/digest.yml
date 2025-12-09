@@ -2,7 +2,7 @@ name: AI Manufacturing Digest
 
 on:
   schedule:
-    - cron: '0 15 * * *'
+    - cron: '0 15 * * 1'   # Every Monday at 15:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -38,4 +38,3 @@ jobs:
         run: |
           chmod +x summarize.py
           python summarize.py
-
