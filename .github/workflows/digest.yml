@@ -1,35 +1,41 @@
-name: AI Manufacturing Use Case Digest
+name: AI Manufacturing Digest
 
 on:
   schedule:
-    - cron: '0 15 * * *'  # Daily at 3 PM UTC
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
-  extract:
+  summarize:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          pip install feedparser requests beautifulsoup4 html5lib
+          python -m pip install --upgrade pip
+          pip install feedparser requests beautifulsoup4
 
-      - name: Test DNS resolution
+      - name: DNS test
         run: |
           echo "Testing api.openrouter.ai..."
-          nslookup api.openrouter.ai || echo "⚠️ DNS failed!"
-          curl -v https://api.openrouter.ai/v1/chat/completions 2>&1 | head -n 10
+          nslookup api.openrouter.ai || true
+          echo "Testing openrouter.ai..."
+          nslookup openrouter.ai || true
 
       - name: Run summarizer
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python summarize.py
+        run: |
+          chmod +x summarize.py
+          python summarize.py
+
