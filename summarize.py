@@ -45,27 +45,31 @@ def call_llm(prompt):
         "HTTP-Referer": "https://github.com/your-repo",
         "X-Title": "AI Manufacturing Digest"
     }
+
+    urls = [
+        "https://api.openrouter.ai/v1/chat/completions",     # primary
+        "https://openrouter.ai/api/v1/chat/completions"      # backup
+    ]
+
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 800,
         "temperature": 0.3
     }
-    for attempt in range(3):  # Retry up to 3 times
-        try:
-            resp = requests.post(
-                "https://api.openrouter.ai/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=50
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            print(f"⚠️ LLM error (attempt {attempt+1}): {e}")
-            if attempt < 2:
-                time.sleep(5)  # Wait before retry
+
+    for attempt in range(3):  # retries
+        for url in urls:      # fallback to backup URL
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=50)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                print(f"⚠️ LLM error on {url} (attempt {attempt+1}): {e}")
+        time.sleep(5)
+
     return None
+
 
 def extract_use_case(article_text, title, url):
     prompt = f"""
