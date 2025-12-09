@@ -19,7 +19,7 @@ FEEDS = [
     "https://venturebeat.com/category/ai/feed/"
 ]
 
-MODEL = "mistral/mistral-7b-instruct"
+MODEL = "tngtech/deepseek-r1t2-chimera:free"  # ← NEW MODEL
 MAX_ARTICLES_PER_FEED = 6
 
 if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
@@ -127,7 +127,7 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
 
 # ------------------- MAIN -------------------
 def main():
-    print("🚀 Starting Simple AI Manufacturing Digest")
+    print("🚀 Starting Simple AI Manufacturing Digest (DeepSeek R1T2 Chimera)")
     seen = set()
     for feed_url in FEEDS:
         print(f"\n📡 Feed: {feed_url}")
