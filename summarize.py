@@ -16,7 +16,21 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
 FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
-    "https://venturebeat.com/category/ai/feed/"
+    "https://venturebeat.com/category/ai/feed/",
+    "https://spectrum.ieee.org/rss/robotics",
+    "https://www.automationworld.com/rss",
+    "https://www.roboticsbusinessreview.com/feed/",
+    "https://www.manufacturing.net/rss/all-news",
+    "https://www.cioreview.com/rss/manufacturing.xml",
+    "https://www.machinedesign.com/rss/all",
+    "https://www.engineering.com/AdvancedManufacturing/RSS",
+    "https://www.assemblymag.com/rss/all-news",
+    "https://www.industryweek.com/rss",
+    "https://www.mckinsey.com/industries/advanced-electronics/our-insights/rss",
+    "https://www.forbes.com/manufacturing/feed2/",
+    "https://techcrunch.com/tag/ai/feed/",
+    "https://www.therobotreport.com/feed/",
+    "https://www.iotforall.com/feed/",
 ]
 
 MODEL = "tngtech/deepseek-r1t2-chimera:free"
@@ -111,7 +125,7 @@ def extract_use_case(article_text, title, url):
     prompt = f"""
 You are an AI application expert for manufacturing. Extract ONE AI use case in manufacturing from this article. Return JSON with:
 - "problem": challenge addressed in the news
-- "ai_solution": how AI solves it
+- "ai_solution": how was it solved using AI
 - "category": ["tag1", "tag2"]
 - "industry": ["sector1", "sector2"]
 
