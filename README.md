@@ -4,6 +4,14 @@ A GitHub Actions workflow that automatically fetches, summarizes, and saves the 
 
 ---
 
+## 📷 Demo
+
+Here’s a demo of the AI Manufacturing Digest in action:
+
+![AI Manufacturing Digest Demo](assets/demo.png)
+
+---
+
 ## 📡 Features
 
 - Aggregates news from multiple manufacturing and AI-related RSS feeds.
@@ -101,9 +109,3 @@ Scheduled run
  - Notion API
  - OpenRouter API
  - GitHub Actions documentation
-
-## 📷 Demo
-
-Here’s a demo of the AI Manufacturing Digest in action:
-
-![AI Manufacturing Digest Demo](assets/demo.png)
