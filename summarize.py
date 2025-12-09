@@ -4,25 +4,39 @@ import json
 import time
 import feedparser
 import requests
+import socket
 from bs4 import BeautifulSoup
 import html
 from datetime import datetime
 
-# ------------------- SSL ADAPTER FOR HOST HEADER (Bypass DNS + Fix SSL) -------------------
-from requests.adapters import HTTPAdapter
-from urllib3.util.ssl_ import create_urllib3_context
+# ------------------- DNS RESOLUTION VIA DoH -------------------
+def resolve_domain_doh(domain):
+    try:
+        resp = requests.get(f"https://dns.google/resolve?name={domain}&type=A", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        for answer in data.get("Answer", []):
+            if answer["type"] == 1:  # A record
+                return answer["data"]
+    except Exception as e:
+        print(f"⚠️ DoH resolution failed: {e}")
+    return None
 
-class HostHeaderSSLAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        context = create_urllib3_context()
-        kwargs['ssl_context'] = context
-        return super().init_poolmanager(*args, **kwargs)
+# Resolve once at startup
+OPENROUTER_IP = resolve_domain_doh("api.openrouter.ai")
+if not OPENROUTER_IP:
+    raise SystemExit("❌ Could not resolve api.openrouter.ai using DNS-over-HTTPS")
 
-    def send(self, request, **kwargs):
-        # Ensure SSL cert is validated against the real hostname
-        connection_pool_kwargs = self.poolmanager.connection_pool_kw
-        connection_pool_kwargs["assert_hostname"] = "api.openrouter.ai"
-        return super().send(request, **kwargs)
+print(f"✅ Using IP {OPENROUTER_IP} for api.openrouter.ai")
+
+# Patch socket.getaddrinfo to return our IP
+original_getaddrinfo = socket.getaddrinfo
+def patched_getaddrinfo(*args, **kwargs):
+    if args[0] == "api.openrouter.ai":
+        return original_getaddrinfo(OPENROUTER_IP, *args[1:], **kwargs)
+    return original_getaddrinfo(*args, **kwargs)
+
+socket.getaddrinfo = patched_getaddrinfo
 
 # ------------------- CONFIG -------------------
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
@@ -34,7 +48,7 @@ FEEDS = [
     "https://www.manufacturingdive.com/feeds/news/",
     "https://venturebeat.com/category/ai/feed/",
     "https://www.iot-worlds.com/feed/",
-    "https://www.smartindustry.som/rss/articles/"
+    "https://www.smartindustry.com/rss/articles/"
 ]
 
 MODEL = "mistral/mistral-7b-instruct"
@@ -43,7 +57,6 @@ MAX_ARTICLES_PER_FEED = 8
 if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
     raise SystemExit("❌ Missing required environment variables")
 
-# ------------------- RELEVANCE KEYWORDS -------------------
 RELEVANCE_KEYWORDS = [
     "manufactur", "factory", "industrial", "production", "plant", "assembly", "shop floor",
     "ai ", "artificial intelligence", "machine learning", "ml ", "deep learning", "neural network",
@@ -59,39 +72,34 @@ RELEVANCE_KEYWORDS = [
 def is_relevant(text):
     return any(kw in text.lower() for kw in RELEVANCE_KEYWORDS)
 
-# ------------------- HELPERS -------------------
 def clean_html(raw_text):
     soup = BeautifulSoup(raw_text, "html.parser")
     return html.unescape(soup.get_text(" ", strip=True))
 
 def call_llm(prompt, max_tokens=800):
-    # Use direct IP to bypass DNS resolution failures in GitHub Actions
-    OPENROUTER_IP = "104.21.84.145"  # One of api.openrouter.ai's Cloudflare IPs
-    url = f"https://{OPENROUTER_IP}/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/your-repo",
-        "X-Title": "AI Manufacturing Digest",
-        "Host": "api.openrouter.ai"  # Critical for Cloudflare routing
+        "X-Title": "AI Manufacturing Digest"
     }
-
     payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.4
     }
-
     try:
-        session = requests.Session()
-        session.mount("https://", HostHeaderSSLAdapter())
-        response = session.post(url, headers=headers, json=payload, timeout=50)
+        response = requests.post(
+            "https://api.openrouter.ai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=50
+        )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"⚠️ LLM error (IP fallback): {e}")
+        print(f"⚠️ LLM error: {e}")
         return None
 
 def extract_use_case(article_text, title, url):
@@ -164,9 +172,8 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
         print(f"❌ Notion API error: {e}")
         return False
 
-# ------------------- MAIN -------------------
 def main():
-    print("🚀 Starting AI Manufacturing Use Case Extractor (DNS Bypass Enabled)")
+    print("🚀 Starting AI Manufacturing Use Case Extractor (DoH DNS Fix)")
     processed_titles = set()
 
     for feed_url in FEEDS:
