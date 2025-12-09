@@ -21,8 +21,11 @@ jobs:
         run: |
           pip install feedparser requests beautifulsoup4 html5lib
 
-      - name: Test DNS (debug)
-        run: nslookup api.openrouter.ai || echo "⚠️ DNS warning (may still work)"
+      - name: Test DNS resolution
+        run: |
+          echo "Testing api.openrouter.ai..."
+          nslookup api.openrouter.ai || echo "⚠️ DNS failed!"
+          curl -v https://api.openrouter.ai/v1/chat/completions 2>&1 | head -n 10
 
       - name: Run summarizer
         env:
