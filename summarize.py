@@ -1,163 +1,202 @@
 #!/usr/bin/env python3
 import os
-import time
 import json
+import time
 import feedparser
 import requests
 from bs4 import BeautifulSoup
 import html
-import socket  # For IPv4 fallback
-
-# ------------------- IPv4 Fallback (fixes DNS issues in some CI envs) -------------------
-original_getaddrinfo = socket.getaddrinfo
-def ipv4_only_getaddrinfo(*args, **kwargs):
-    responses = original_getaddrinfo(*args, **kwargs)
-    return [res for res in responses if res[0] == socket.AF_INET]
-socket.getaddrinfo = ipv4_only_getaddrinfo
+from datetime import datetime
 
 # ------------------- CONFIG -------------------
-OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
-NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
 
 FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
-    "https://venturebeat.com/category/ai/feed/"
+    "https://venturebeat.com/category/ai/feed/",
+    "https://www.iot-worlds.com/feed/",
+    "https://www.smartindustry.com/rss/articles/"
 ]
 
-MODEL_ID = "mistral/mistral-7b-instruct"
-MAX_RETRIES = 5
-RETRY_BACKOFF = 5  # seconds
+MODEL = "mistral/mistral-7b-instruct"
+MAX_ARTICLES_PER_FEED = 8
 
-HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_KEY}",
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://github.com/your-username/your-repo",  # Optional but recommended by OpenRouter
-    "X-Title": "AI Manufacturing Digest",  # Optional
-}
+# Validate environment variables
+if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
+    raise SystemExit("❌ Missing required environment variables")
 
-# ------------------- HELPERS -------------------
-def clean_article(text):
-    soup = BeautifulSoup(text, "html.parser")
-    clean_text = soup.get_text(separator=" ")
-    clean_text = html.unescape(clean_text)
-    return clean_text.strip()
-
-def chunk_text(text, size=4000):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + size
-        chunks.append(text[start:end])
-        start = end
-    return chunks
-
-def call_model(prompt):
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            data = {
-                "model": MODEL_ID,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 500
-            }
-            response = requests.post(
-                "https://api.openrouter.ai/v1/chat/completions",
-                headers=HEADERS,
-                json=data,  # Cleaner than data=json.dumps()
-                timeout=60
-            )
-            if response.status_code == 429:
-                backoff = RETRY_BACKOFF * (2 ** (attempt - 1))
-                print(f"⚠️ Rate limit hit. Waiting {backoff}s before retry...")
-                time.sleep(backoff)
-                continue
-            response.raise_for_status()
-            result = response.json()
-            output_text = result["choices"][0]["message"]["content"].strip()
-            return output_text
-        except Exception as e:
-            print(f"❌ Model call error on attempt {attempt}: {e}")
-            time.sleep(RETRY_BACKOFF)
-    return None
-
-def parse_json_safe(text):
-    try:
-        # Sometimes model returns markdown code blocks
-        if text.startswith("```json"):
-            text = text.split("```json", 1)[1].split("```", 1)[0]
-        elif text.startswith("```"):
-            text = text.split("```", 1)[1].split("```", 1)[0]
-        return json.loads(text.strip())
-    except (json.JSONDecodeError, IndexError):
-        return None
-
-def summarize_article(title, text):
-    text = clean_article(text)
-    chunks = chunk_text(text)
-    summaries = []
-    for i, chunk in enumerate(chunks):
-        print(f"  ➤ Model chunk {i+1}/{len(chunks)} ...")
-        prompt = f"""You are an AI assistant. Summarize the following article chunk.
-Return ONLY a JSON object in this format:
-{{
-  "title": "{title}",
-  "summary": "<short summary of use case or key point>",
-  "keywords": ["keyword1", "keyword2"]
-}}
-
-Article chunk:
-{chunk}"""
-        output = call_model(prompt)
-        if not output:
-            print(f"  ❌ Chunk {i+1} failed or returned invalid data")
-            continue
-        data = parse_json_safe(output)
-        if data and "summary" in data and "keywords" in data:
-            summaries.append(data)
-        else:
-            print(f"  ❌ Failed to parse JSON from chunk: {output[:200]}...")
-    if summaries:
-        merged = {
-            "title": title,
-            "summary": " ".join([s["summary"] for s in summaries]),
-            "keywords": list({kw for s in summaries for kw in s["keywords"]})
-        }
-        return merged
-    return None
+# ------------------- RELEVANCE KEYWORDS -------------------
+RELEVANCE_KEYWORDS = [
+    # Core manufacturing
+    "manufactur", "factory", "industrial", "production", "plant", "assembly", "shop floor",
+    # AI & automation
+    "ai ", "artificial intelligence", "machine learning", "ml ", "deep learning", "neural network",
+    "computer vision", "predictive maintenance", "digital twin", "iiot", "industry 4.0",
+    "smart factory", "automation", "robotics", "cobots", "agv", "autonomous mobile robot",
+    "process mining", "anomaly detection", "yield optimization",
+    # Technologies & processes
+    "cnc", "machining", "3d printing", "additive manufacturing", "quality control",
+    "defect detection", "visual inspection", "supply chain", "logistics", "warehouse automation",
+    # Industries & materials
+    "automotive", "aerospace", "semiconductor", "electronics", "pharmaceutical",
+    "food and beverage", "chemical", "metal", "steel", "plastic", "textile", "packaging"
+]
 
 def is_relevant(text):
-    keywords = ["manufacturing", "AI", "automation", "industrial", "robotics", "machine learning"]
     text_lower = text.lower()
-    return any(k.lower() in text_lower for k in keywords)
+    return any(kw in text_lower for kw in RELEVANCE_KEYWORDS)
+
+# ------------------- HELPERS -------------------
+def clean_html(raw_text):
+    soup = BeautifulSoup(raw_text, "html.parser")
+    return html.unescape(soup.get_text(" ", strip=True))
+
+def call_llm(prompt, max_tokens=800):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/your-repo",
+        "X-Title": "AI Manufacturing Digest"
+    }
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.4
+    }
+    try:
+        response = requests.post(
+            "https://api.openrouter.ai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=50
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"⚠️ LLM error: {e}")
+        return None
+
+def extract_use_case(article_text, title, url):
+    prompt = f"""
+You are an expert in AI for manufacturing. Extract ONE concrete use case from this article.
+
+Return a JSON with:
+- "problem": the manufacturing challenge
+- "ai_solution": how AI solves it
+- "category": list of 2-4 technical tags (e.g., ["predictive maintenance", "computer vision"])
+- "industry": list of applicable industries (e.g., ["automotive", "aerospace"])
+
+If NOT a valid AI+manufacturing use case, return: {{"skip": true}}
+
+Title: {title}
+Text:
+{article_text[:5000]}
+"""
+    output = call_llm(prompt)
+    if not output:
+        return None
+    try:
+        # Remove markdown code fences
+        if output.startswith("```json"):
+            output = output.split("```json", 1)[1].split("```", 1)[0]
+        elif output.startswith("```"):
+            output = output.split("```", 1)[1].split("```", 1)[0]
+        data = json.loads(output.strip())
+        if data.get("skip"):
+            return None
+        # Normalize to lists
+        category = data.get("category", [])
+        industry = data.get("industry", [])
+        if isinstance(category, str):
+            category = [category]
+        if isinstance(industry, str):
+            industry = [industry]
+        return {
+            "problem": str(data.get("problem", ""))[:1000],
+            "ai_solution": str(data.get("ai_solution", ""))[:1000],
+            "category": [str(t).strip()[:50] for t in category if t],
+            "industry": [str(i).strip()[:50] for i in industry if i] or ["General"]
+        }
+    except Exception as e:
+        print(f"❌ JSON parse failed: {e}")
+        return None
+
+def post_to_notion(title, problem, ai_solution, category, industry, source, date_str):
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    payload = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Title": {"title": [{"text": {"content": title[:100]}}]},
+            "Problem": {"rich_text": [{"text": {"content": problem or "N/A"}}]},
+            "AI Solution": {"rich_text": [{"text": {"content": ai_solution or "N/A"}}]},
+            "Category": {"multi_select": [{"name": tag} for tag in category[:5]]},
+            "Industry": {"multi_select": [{"name": ind} for ind in industry[:5]]},  # ✅ Multi-select!
+            "Source": {"url": source},
+            "Date": {"date": {"start": date_str}}
+        }
+    }
+    try:
+        resp = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload)
+        resp.raise_for_status()
+        print(f"✅ Added to Notion: {title}")
+        return True
+    except Exception as e:
+        print(f"❌ Notion API error: {e}")
+        return False
 
 # ------------------- MAIN -------------------
 def main():
-    if not (OPENROUTER_KEY and NOTION_TOKEN and NOTION_DATABASE_ID):
-        print("❌ Missing one or more environment variables!")
-        return
+    print("🚀 Starting AI Manufacturing Use Case Extractor")
+    processed_titles = set()
 
-    print("✅ Environment variables loaded")
     for feed_url in FEEDS:
-        feed_url = feed_url.strip()
+        print(f"\n📡 Fetching feed: {feed_url}")
         try:
-            print(f"📡 Fetching feed: {feed_url}")
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries:
-                title = entry.get("title", "No title")
-                text = entry.get("content", [{"value": entry.get("summary", "")}])[0]["value"]
-                if not is_relevant(title + " " + text):
-                    print(f"⏭️ Skipping: {title}")
+            for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
+                title = entry.get("title", "").strip()
+                if not title or title in processed_titles:
                     continue
-                print(f"🔎 Processing article: {title} ({len(text)} chars)")
-                summary_data = summarize_article(title, text)
-                if summary_data:
-                    print(f"✅ Summary found: {summary_data['title']}")
-                else:
-                    print(f"⏭️ No valid use case found: {title}")
+                processed_titles.add(title)
+
+                raw_content = entry.get("summary", "") + " " + entry.get("content", [{}])[0].get("value", "")
+                clean_content = clean_html(raw_content)
+                pub_time = entry.get("published_parsed")
+                date_str = time.strftime("%Y-%m-%d", pub_time) if pub_time else datetime.utcnow().strftime("%Y-%m-%d")
+
+                if not is_relevant(title + " " + clean_content):
+                    print(f"⏭️ Skipped (not relevant): {title}")
+                    continue
+
+                print(f"🧠 Analyzing: {title}")
+                use_case = extract_use_case(clean_content, title, entry.link)
+                if not use_case:
+                    print(f"⏭️ No valid use case: {title}")
+                    continue
+
+                post_to_notion(
+                    title=title,
+                    problem=use_case["problem"],
+                    ai_solution=use_case["ai_solution"],
+                    category=use_case["category"],
+                    industry=use_case["industry"],
+                    source=entry.link,
+                    date_str=date_str
+                )
+                time.sleep(2.5)  # Respect free-tier rate limits
+
         except Exception as e:
-            print(f"❌ Error processing feed {feed_url}: {e}")
+            print(f"💥 Error processing {feed_url}: {e}")
+
+    print("\n✅ Workflow completed!")
 
 if __name__ == "__main__":
     main()
-
