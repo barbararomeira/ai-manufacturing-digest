@@ -2,194 +2,162 @@
 import os
 import time
 import json
-import requests
 import feedparser
+import requests
 from bs4 import BeautifulSoup
+import html
+import socket  # For IPv4 fallback
 
-# -----------------------------------------
-# CONFIG
-# -----------------------------------------
-MODEL = "google/gemini-2.0-flash-thinking-exp:free"
-OPENROUTER_URL = "https://api.openrouter.ai/v1/chat/completions"
-TIMEOUT = 30
-MAX_RETRIES = 5
-CHUNK_SIZE = 3500
+# ------------------- IPv4 Fallback (fixes DNS issues in some CI envs) -------------------
+original_getaddrinfo = socket.getaddrinfo
+def ipv4_only_getaddrinfo(*args, **kwargs):
+    responses = original_getaddrinfo(*args, **kwargs)
+    return [res for res in responses if res[0] == socket.AF_INET]
+socket.getaddrinfo = ipv4_only_getaddrinfo
 
+# ------------------- CONFIG -------------------
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "").strip()
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
 
-# -----------------------------------------
-# Read env variables
-# -----------------------------------------
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-
-print("🔧 Environment check:")
-print("  OPENROUTER_KEY:", "OK" if OPENROUTER_KEY else "MISSING!")
-print("  NOTION_TOKEN:", "OK" if NOTION_TOKEN else "MISSING!")
-print("  NOTION_DATABASE_ID:", "OK" if NOTION_DATABASE_ID else "MISSING!")
-print()
-
-
-# -----------------------------------------
-# Clean HTML safely
-# -----------------------------------------
-def clean_html(raw_html):
-    soup = BeautifulSoup(raw_html, "html.parser")
-    cleaned = soup.get_text(separator=" ", strip=True)
-    return cleaned
-
-
-# -----------------------------------------
-# OpenRouter API call with retries
-# -----------------------------------------
-def call_model(prompt):
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": MODEL,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.2
-                },
-                timeout=TIMEOUT
-            )
-
-            # If DNS / network fails, this is where it happens
-            if response.status_code != 200:
-                print(f"  ❌ API Error {response.status_code}: {response.text}")
-                continue
-
-            return response.json()["choices"][0]["message"]["content"]
-
-        except requests.exceptions.RequestException as e:
-            print(f"  ⚠️ Network error (attempt {attempt}/{MAX_RETRIES}): {e}")
-
-        # exponential backoff
-        time.sleep(2 ** attempt)
-
-    print("  ❌ Model gave no result after retries")
-    return None
-
-
-# -----------------------------------------
-# Build prompt for the model
-# -----------------------------------------
-def build_prompt(text):
-    return f"""
-You will receive an article chunk. Extract ONLY if present:
-
-{{
-  "title": "...",
-  "summary": "...",
-  "use_case": "..."
-}}
-
-Rules:
-- MUST return valid JSON only.
-- No explanations.
-- If no use case exists, return: {{"use_case": null}}
-- Never output HTML.
-
-Article chunk:
-{text}
-"""
-
-
-# -----------------------------------------
-# Process a single article
-# -----------------------------------------
-def summarize_article(title, html_content):
-    print(f"🔎 Processing: {title}")
-
-    text = clean_html(html_content)
-
-    if len(text) < 200:
-        print("  ⏭️ Too short, skipping.")
-        return None
-
-    # Split into chunks
-    chunks = [
-        text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)
-    ]
-
-    full_summary = ""
-    final_use_case = None
-
-    for idx, chunk in enumerate(chunks, start=1):
-        print(f"  ➤ Chunk {idx}/{len(chunks)}...")
-
-        prompt = build_prompt(chunk)
-        output = call_model(prompt)
-
-        if not output:
-            print("  ❌ Model returned nothing for chunk.")
-            continue
-
-        # Parse JSON safely
-        try:
-            data = json.loads(output)
-        except json.JSONDecodeError:
-            print("  ❌ Invalid JSON returned by model.")
-            continue
-
-        # Accumulate findings
-        if "summary" in data:
-            full_summary += data["summary"] + " "
-
-        if not final_use_case and "use_case" in data and data["use_case"]:
-            final_use_case = data["use_case"]
-
-    if not full_summary.strip():
-        print("  ⏭️ No usable summary extracted.")
-        return None
-
-    return {
-        "title": title,
-        "summary": full_summary.strip(),
-        "use_case": final_use_case
-    }
-
-
-# -----------------------------------------
-# Feeds to process
-# -----------------------------------------
 FEEDS = [
     "https://industry4o.com/feed",
     "https://www.manufacturingdive.com/feeds/news/",
     "https://venturebeat.com/category/ai/feed/"
 ]
 
+MODEL_ID = "mistral/mistral-7b-instruct"
+MAX_RETRIES = 5
+RETRY_BACKOFF = 5  # seconds
 
-# -----------------------------------------
-# MAIN LOOP
-# -----------------------------------------
-for feed_url in FEEDS:
-    print(f"\n📡 Fetching feed: {feed_url}")
-    feed = feedparser.parse(feed_url)
+HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_KEY}",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://github.com/your-username/your-repo",  # Optional but recommended by OpenRouter
+    "X-Title": "AI Manufacturing Digest",  # Optional
+}
 
-    for entry in feed.entries:
-        title = entry.title
-        raw = entry.get("content", [{"value": entry.get("summary", "")}])[0]["value"]
+# ------------------- HELPERS -------------------
+def clean_article(text):
+    soup = BeautifulSoup(text, "html.parser")
+    clean_text = soup.get_text(separator=" ")
+    clean_text = html.unescape(clean_text)
+    return clean_text.strip()
 
-        result = summarize_article(title, raw)
+def chunk_text(text, size=4000):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end
+    return chunks
 
-        if not result:
-            print(f"⏭️ No summary saved for: {title}")
+def call_model(prompt):
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            data = {
+                "model": MODEL_ID,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500
+            }
+            response = requests.post(
+                "https://api.openrouter.ai/v1/chat/completions",
+                headers=HEADERS,
+                json=data,  # Cleaner than data=json.dumps()
+                timeout=60
+            )
+            if response.status_code == 429:
+                backoff = RETRY_BACKOFF * (2 ** (attempt - 1))
+                print(f"⚠️ Rate limit hit. Waiting {backoff}s before retry...")
+                time.sleep(backoff)
+                continue
+            response.raise_for_status()
+            result = response.json()
+            output_text = result["choices"][0]["message"]["content"].strip()
+            return output_text
+        except Exception as e:
+            print(f"❌ Model call error on attempt {attempt}: {e}")
+            time.sleep(RETRY_BACKOFF)
+    return None
+
+def parse_json_safe(text):
+    try:
+        # Sometimes model returns markdown code blocks
+        if text.startswith("```json"):
+            text = text.split("```json", 1)[1].split("```", 1)[0]
+        elif text.startswith("```"):
+            text = text.split("```", 1)[1].split("```", 1)[0]
+        return json.loads(text.strip())
+    except (json.JSONDecodeError, IndexError):
+        return None
+
+def summarize_article(title, text):
+    text = clean_article(text)
+    chunks = chunk_text(text)
+    summaries = []
+    for i, chunk in enumerate(chunks):
+        print(f"  ➤ Model chunk {i+1}/{len(chunks)} ...")
+        prompt = f"""You are an AI assistant. Summarize the following article chunk.
+Return ONLY a JSON object in this format:
+{{
+  "title": "{title}",
+  "summary": "<short summary of use case or key point>",
+  "keywords": ["keyword1", "keyword2"]
+}}
+
+Article chunk:
+{chunk}"""
+        output = call_model(prompt)
+        if not output:
+            print(f"  ❌ Chunk {i+1} failed or returned invalid data")
             continue
+        data = parse_json_safe(output)
+        if data and "summary" in data and "keywords" in data:
+            summaries.append(data)
+        else:
+            print(f"  ❌ Failed to parse JSON from chunk: {output[:200]}...")
+    if summaries:
+        merged = {
+            "title": title,
+            "summary": " ".join([s["summary"] for s in summaries]),
+            "keywords": list({kw for s in summaries for kw in s["keywords"]})
+        }
+        return merged
+    return None
 
-        print(f"✅ Summary extracted: {result['title'][:40]}...")
-        print()
+def is_relevant(text):
+    keywords = ["manufacturing", "AI", "automation", "industrial", "robotics", "machine learning"]
+    text_lower = text.lower()
+    return any(k.lower() in text_lower for k in keywords)
 
+# ------------------- MAIN -------------------
+def main():
+    if not (OPENROUTER_KEY and NOTION_TOKEN and NOTION_DATABASE_ID):
+        print("❌ Missing one or more environment variables!")
+        return
 
-print("\n🎉 DONE — script finished cleanly.\n")
+    print("✅ Environment variables loaded")
+    for feed_url in FEEDS:
+        feed_url = feed_url.strip()
+        try:
+            print(f"📡 Fetching feed: {feed_url}")
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                title = entry.get("title", "No title")
+                text = entry.get("content", [{"value": entry.get("summary", "")}])[0]["value"]
+                if not is_relevant(title + " " + text):
+                    print(f"⏭️ Skipping: {title}")
+                    continue
+                print(f"🔎 Processing article: {title} ({len(text)} chars)")
+                summary_data = summarize_article(title, text)
+                if summary_data:
+                    print(f"✅ Summary found: {summary_data['title']}")
+                else:
+                    print(f"⏭️ No valid use case found: {title}")
+        except Exception as e:
+            print(f"❌ Error processing feed {feed_url}: {e}")
+
+if __name__ == "__main__":
+    main()
 
