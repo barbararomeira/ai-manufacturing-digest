@@ -22,7 +22,6 @@ FEEDS = [
 MODEL = "tngtech/deepseek-r1t2-chimera:free"
 MAX_ARTICLES_PER_FEED = 6
 
-# Two endpoints to avoid GitHub Actions DNS issues
 OPENROUTER_ENDPOINTS = [
     "https://api.openrouter.ai/v1/chat/completions",
     "https://openrouter.ai/api/v1/chat/completions"
@@ -38,55 +37,42 @@ RELEVANCE_KEYWORDS = [
     "automotive", "aerospace", "cnc", "defect detection", "supply chain"
 ]
 
-# ------------------- WEEKLY FILTER SETUP -------------------
-ONE_WEEK_AGO = datetime.utcnow() - timedelta(days=7)
-
-
-# ------------------- DUPLICATE CHECK -------------------
-def notion_has_article(source_url, title):
-    """
-    Check if Notion already contains an article with this exact Source URL
-    OR Title. Prevents duplicates.
-    """
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-    }
-
-    payload = {
-        "filter": {
-            "or": [
-                {"property": "Source", "url": {"equals": source_url}},
-                {"property": "Title", "title": {"equals": title[:100]}}
-            ]
-        },
-        "page_size": 1
-    }
-
-    try:
-        resp = requests.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-        resp.raise_for_status()
-        return len(resp.json().get("results", [])) > 0
-    except Exception as e:
-        print(f"⚠️ Notion duplicate-check error (ignoring): {e}")
-        return False
-
-
+# ------------------- HELPERS -------------------
 def is_relevant(text):
     return any(kw in text.lower() for kw in RELEVANCE_KEYWORDS)
-
 
 def clean_html(raw):
     return html.unescape(BeautifulSoup(raw, "html.parser").get_text(" ", strip=True))
 
+# ------------------- CHECK NOTION FOR DUPLICATES -------------------
+def notion_has_title(title):
+    """Returns True if the title already exists in Notion DB."""
+    url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
 
-# ------------------- LLM CALL WITH FALLBACK ENDPOINTS -------------------
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+
+    payload = {
+        "filter": {
+            "property": "Title",
+            "title": {"equals": title}
+        }
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        return len(results) > 0
+    except Exception as e:
+        print(f"⚠️ Notion duplicate check error: {e}")
+        # fail-safe: assume not duplicate
+        return False
+
+# ------------------- LLM CALL -------------------
 def call_llm(prompt):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -106,10 +92,13 @@ def call_llm(prompt):
         for attempt in range(2):
             try:
                 print(f"🌐 Trying LLM endpoint: {endpoint} (attempt {attempt+1})")
+
                 resp = requests.post(endpoint, headers=headers, json=payload, timeout=60)
                 resp.raise_for_status()
+
                 data = resp.json()
                 return data["choices"][0]["message"]["content"].strip()
+
             except Exception as e:
                 print(f"⚠️ LLM error on {endpoint} (attempt {attempt+1}): {e}")
                 time.sleep(1)
@@ -117,12 +106,11 @@ def call_llm(prompt):
     print("❌ All OpenRouter endpoints failed.")
     return None
 
-
 # ------------------- USE CASE EXTRACTION -------------------
 def extract_use_case(article_text, title, url):
     prompt = f"""
 You are an AI application expert for manufacturing. Extract ONE AI use case in manufacturing from this article. Return JSON with:
-- "problem": challenge address in the news
+- "problem": challenge addressed in the news
 - "ai_solution": how AI solves it
 - "category": ["tag1", "tag2"]
 - "industry": ["sector1", "sector2"]
@@ -156,7 +144,6 @@ Text: {article_text[:4000]}
         print(f"❌ JSON error: {e}")
         return None
 
-
 # ------------------- NOTION POSTING -------------------
 def post_to_notion(title, problem, ai_solution, category, industry, source, date_str):
     headers = {
@@ -186,11 +173,11 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
         print(f"❌ Notion error: {e}")
         return False
 
-
 # ------------------- MAIN -------------------
 def main():
     print("🚀 Starting AI Manufacturing Digest")
-    seen = set()
+
+    one_week_ago = datetime.utcnow() - timedelta(days=7)
 
     for feed_url in FEEDS:
         print(f"\n📡 Feed: {feed_url}")
@@ -199,28 +186,25 @@ def main():
             feed = feedparser.parse(feed_url)
 
             for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
-
                 title = entry.title.strip()
-                if not title or title in seen:
+                if not title:
                     continue
-                seen.add(title)
 
-                # WEEKLY FILTER — skip articles older than 7 days
+                # 1️⃣ Skip if already in Notion
+                if notion_has_title(title):
+                    print(f"⏭️ Already in Notion: {title}")
+                    continue
+
+                # 2️⃣ Extract date and skip old news
                 pub = entry.get("published_parsed")
                 if pub:
-                    pub_dt = datetime(*pub[:6])
+                    published_date = datetime(*pub[:6])
                 else:
-                    pub_dt = datetime.utcnow()
+                    # If no date, assume it's new
+                    published_date = datetime.utcnow()
 
-                if pub_dt < ONE_WEEK_AGO:
-                    print(f"⏭️ Too old (>{7} days): {title}")
-                    continue
-
-                date_str = pub_dt.strftime("%Y-%m-%d")
-
-                # Check for duplicates in Notion
-                if notion_has_article(entry.link, title):
-                    print(f"⏭️ Already exists in Notion: {title}")
+                if published_date < one_week_ago:
+                    print(f"⏭️ Older than 7 days: {title}")
                     continue
 
                 # Extract text
@@ -230,8 +214,10 @@ def main():
                     entry.get("content", [{}])[0].get("value", "")
                 )
 
+                date_str = published_date.strftime("%Y-%m-%d")
+
                 if not is_relevant(title + " " + text):
-                    print(f"⏭️ Skipped (not relevant): {title}")
+                    print(f"⏭️ Skipped (irrelevant): {title}")
                     continue
 
                 print(f"🧠 Processing: {title}")
@@ -257,7 +243,6 @@ def main():
             print(f"💥 Feed error: {e}")
 
     print("\n✅ Done!")
-
 
 if __name__ == "__main__":
     main()
