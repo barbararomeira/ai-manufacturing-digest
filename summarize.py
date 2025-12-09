@@ -1,214 +1,233 @@
 #!/usr/bin/env python3
 import os
-import json
+import re
 import time
-import feedparser
+import json
 import requests
+import feedparser
 from bs4 import BeautifulSoup
-import html
-from datetime import datetime
 
-# ------------------- CONFIG -------------------
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
-NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
+# ─────────────────────────────────────────────────────────────
+# ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────────────────────
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-FEEDS = [
-    "https://industry4o.com/feed",
-    "https://www.manufacturingdive.com/feeds/news/",
-    "https://venturebeat.com/category/ai/feed/"
-]
-
-MODEL = "tngtech/deepseek-r1t2-chimera:free"
-MAX_ARTICLES_PER_FEED = 6
-
-# Two endpoints to avoid GitHub Actions DNS issues
-OPENROUTER_ENDPOINTS = [
-    "https://api.openrouter.ai/v1/chat/completions",
-    "https://openrouter.ai/api/v1/chat/completions"
-]
-
-if not all([OPENROUTER_KEY, NOTION_TOKEN, NOTION_DATABASE_ID]):
-    raise SystemExit("❌ Missing environment variables")
-
-RELEVANCE_KEYWORDS = [
-    "manufactur", "factory", "industrial", "production", "ai ", "artificial intelligence",
-    "machine learning", "robotics", "automation", "predictive maintenance", "digital twin",
-    "smart factory", "computer vision", "quality control", "iiot", "industry 4.0",
-    "automotive", "aerospace", "cnc", "defect detection", "supply chain"
-]
+MODEL = "deepseek/deepseek-r1-distill-qwen-32b"  # stable + fast
 
 
-def is_relevant(text):
-    return any(kw in text.lower() for kw in RELEVANCE_KEYWORDS)
+# ─────────────────────────────────────────────────────────────
+# HTML CLEANING
+# ─────────────────────────────────────────────────────────────
+def clean_html(html):
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove scripts, styles, ads, forms
+    for tag in soup(["script", "style", "noscript", "form", "footer", "header", "iframe"]):
+        tag.decompose()
+
+    text = soup.get_text(separator=" ", strip=True)
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-def clean_html(raw):
-    return html.unescape(BeautifulSoup(raw, "html.parser").get_text(" ", strip=True))
+# ─────────────────────────────────────────────────────────────
+# TEXT CHUNKING
+# ─────────────────────────────────────────────────────────────
+def chunk_text(text, max_len=7000):
+    words = text.split()
+    chunks = []
+    current = []
+
+    for w in words:
+        current.append(w)
+        if len(" ".join(current)) > max_len:
+            chunks.append(" ".join(current))
+            current = []
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
 
 
-# ------------------- LLM CALL WITH FALLBACK ENDPOINTS -------------------
-def call_llm(prompt):
+# ─────────────────────────────────────────────────────────────
+# OPENROUTER LLM CALL
+# ─────────────────────────────────────────────────────────────
+def llm(prompt):
+    url = "https://api.openrouter.ai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "HTTP-Referer": "https://github.com",
+        "X-Title": "AI Manufacturing Digest",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/your-repo",
-        "X-Title": "AI Manufacturing Digest"
     }
-
-    payload = {
+    data = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 800,
-        "temperature": 0.3
+        "temperature": 0.3,
     }
 
-    # Try endpoints in order
-    for endpoint in OPENROUTER_ENDPOINTS:
-        for attempt in range(2):  # retry twice per endpoint
-            try:
-                print(f"🌐 Trying LLM endpoint: {endpoint} (attempt {attempt+1})")
-
-                resp = requests.post(endpoint, headers=headers, json=payload, timeout=60)
-                resp.raise_for_status()
-
-                data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-
-            except Exception as e:
-                print(f"⚠️ LLM error on {endpoint} (attempt {attempt+1}): {e}")
-                time.sleep(1)
-
-    print("❌ All OpenRouter endpoints failed.")
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=data, timeout=40)
+            r.raise_for_status()
+            out = r.json()["choices"][0]["message"]["content"]
+            return out
+        except Exception as e:
+            print(f"⚠️ LLM error on {url} (attempt {attempt+1}): {e}")
+            time.sleep(3)
     return None
 
 
-# ------------------- USE CASE EXTRACTION -------------------
-def extract_use_case(article_text, title, url):
+# ─────────────────────────────────────────────────────────────
+# EXTRACT USE CASES
+# ─────────────────────────────────────────────────────────────
+def extract_use_case(text):
     prompt = f"""
-Extract ONE AI use case in manufacturing from this article. Return JSON with:
-- "problem": challenge
-- "ai_solution": how AI solves it
-- "category": ["tag1", "tag2"]
-- "industry": ["sector1", "sector2"]
+Given the article below, extract ONLY ONE item:
 
-If not relevant, return {{"skip": true}}.
+1. A **concise manufacturing-relevant AI use case** (NOT business news, not market analysis)
+2. Return it in EXACTLY this JSON:
+{{
+  "use_case": "string or empty"
+}}
 
-Title: {title}
-Text: {article_text[:4000]}
+Article:
+{text}
 """
-
-    output = call_llm(prompt)
-    if not output:
+    reply = llm(prompt)
+    if not reply:
         return None
 
     try:
-        if "```json" in output:
-            output = output.split("```json")[1].split("```")[0]
-
-        data = json.loads(output.strip())
-
-        if data.get("skip"):
-            return None
-
-        return {
-            "problem": str(data.get("problem", ""))[:1000],
-            "ai_solution": str(data.get("ai_solution", ""))[:1000],
-            "category": [str(t)[:50] for t in (data.get("category") or [])],
-            "industry": [str(i)[:50] for i in (data.get("industry") or [])] or ["General"]
-        }
-    except Exception as e:
-        print(f"❌ JSON error: {e}")
+        data = json.loads(reply)
+        return data.get("use_case")
+    except:
         return None
 
 
-# ------------------- NOTION POSTING -------------------
-def post_to_notion(title, problem, ai_solution, category, industry, source, date_str):
+# ─────────────────────────────────────────────────────────────
+# NOTION DUPLICATE CHECK
+# ─────────────────────────────────────────────────────────────
+def notion_has_article(url, title):
+    """Prevent duplicates by checking if URL or Title already exists."""
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
 
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Title": {"title": [{"text": {"content": title[:100]}}]},
-            "Problem": {"rich_text": [{"text": {"content": problem}}]},
-            "AI Solution": {"rich_text": [{"text": {"content": ai_solution}}]},
-            "Category": {"multi_select": [{"name": c} for c in category[:5]]},
-            "Industry": {"multi_select": [{"name": i} for i in industry[:5]]},
-            "Source": {"url": source},
-            "Date": {"date": {"start": date_str}}
+    query = {
+        "filter": {
+            "or": [
+                {"property": "Source", "url": {"equals": url}},
+                {"property": "Title", "title": {"equals": title[:100]}}
+            ]
         }
     }
 
     try:
-        requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload).raise_for_status()
-        print(f"✅ Added: {title}")
+        r = requests.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+            headers=headers,
+            json=query,
+            timeout=30
+        )
+        r.raise_for_status()
+        return len(r.json().get("results", [])) > 0
+    except Exception as e:
+        print(f"⚠️ Notion query failed (continuing): {e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────
+# POST TO NOTION
+# ─────────────────────────────────────────────────────────────
+def post_to_notion(title, url, use_case):
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+
+    data = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Title": {"title": [{"text": {"content": title}}]},
+            "Source": {"url": url},
+            "Use Case": {"rich_text": [{"text": {"content": use_case}}]},
+        }
+    }
+
+    try:
+        r = requests.post("https://api.notion.com/v1/pages", headers=headers, json=data)
+        r.raise_for_status()
         return True
     except Exception as e:
         print(f"❌ Notion error: {e}")
         return False
 
 
-# ------------------- MAIN -------------------
-def main():
-    print("🚀 Starting AI Manufacturing Digest")
-
-    seen = set()
-
-    for feed_url in FEEDS:
-        print(f"\n📡 Feed: {feed_url}")
-
-        try:
-            feed = feedparser.parse(feed_url)
-
-            for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
-                title = entry.title.strip()
-
-                if not title or title in seen:
-                    continue
-                seen.add(title)
-
-                # Extract text
-                text = clean_html(
-                    entry.get("summary", "") +
-                    " " +
-                    entry.get("content", [{}])[0].get("value", "")
-                )
-
-                pub = entry.get("published_parsed")
-                date_str = time.strftime("%Y-%m-%d", pub) if pub else datetime.utcnow().strftime("%Y-%m-%d")
-
-                if not is_relevant(title + " " + text):
-                    print(f"⏭️ Skipped: {title}")
-                    continue
-
-                print(f"🧠 Processing: {title}")
-
-                use_case = extract_use_case(text, title, entry.link)
-
-                if use_case:
-                    post_to_notion(
-                        title,
-                        use_case["problem"],
-                        use_case["ai_solution"],
-                        use_case["category"],
-                        use_case["industry"],
-                        entry.link,
-                        date_str
-                    )
-                else:
-                    print(f"⏭️ No use case: {title}")
-
-                time.sleep(1.2)
-
-        except Exception as e:
-            print(f"💥 Feed error: {e}")
-
-    print("\n✅ Done!")
+# ─────────────────────────────────────────────────────────────
+# MAIN: PROCESS FEEDS
+# ─────────────────────────────────────────────────────────────
+FEEDS = [
+    "https://industry4o.com/feed",
+    "https://www.manufacturingdive.com/feeds/news/",
+    "https://venturebeat.com/category/ai/feed/",
+]
 
 
+def process_feed(feed_url):
+    print(f"\n📡 Feed: {feed_url}")
+    feed = feedparser.parse(feed_url)
+
+    for entry in feed.entries:
+        title = entry.title.strip()
+        link = entry.link
+
+        print(f"🧠 Processing: {title}")
+
+        # 1. Notion duplicate check
+        if notion_has_article(link, title):
+            print(f"⏭️ Already in Notion: {title}")
+            continue
+
+        # 2. Extract & clean text
+        raw = entry.get("content", [{}])[0].get("value") or entry.get("summary", "")
+        text = clean_html(raw)
+        if not text:
+            print("⏭️ No text found.")
+            continue
+
+        # 3. Chunking for long articles
+        chunks = chunk_text(text)
+        merged_use_case = None
+
+        for c in chunks:
+            uc = extract_use_case(c)
+            if uc:
+                merged_use_case = uc
+                break
+
+        if not merged_use_case:
+            print(f"⏭️ No use case: {title}")
+            continue
+
+        # 4. Post to Notion
+        if post_to_notion(title, link, merged_use_case):
+            print(f"✅ Added: {title}")
+        else:
+            print(f"❌ Failed to add: {title}")
+
+
+# ─────────────────────────────────────────────────────────────
+# EXECUTION
+# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    print("🚀 Starting Simple AI Manufacturing Digest (DeepSeek/Qwen)")
+    for feed in FEEDS:
+        process_feed(feed)
+    print("✅ Done!")
