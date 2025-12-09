@@ -6,7 +6,7 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ------------------- CONFIG -------------------
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
@@ -38,6 +38,45 @@ RELEVANCE_KEYWORDS = [
     "automotive", "aerospace", "cnc", "defect detection", "supply chain"
 ]
 
+# ------------------- WEEKLY FILTER SETUP -------------------
+ONE_WEEK_AGO = datetime.utcnow() - timedelta(days=7)
+
+
+# ------------------- DUPLICATE CHECK -------------------
+def notion_has_article(source_url, title):
+    """
+    Check if Notion already contains an article with this exact Source URL
+    OR Title. Prevents duplicates.
+    """
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    payload = {
+        "filter": {
+            "or": [
+                {"property": "Source", "url": {"equals": source_url}},
+                {"property": "Title", "title": {"equals": title[:100]}}
+            ]
+        },
+        "page_size": 1
+    }
+
+    try:
+        resp = requests.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+        resp.raise_for_status()
+        return len(resp.json().get("results", [])) > 0
+    except Exception as e:
+        print(f"⚠️ Notion duplicate-check error (ignoring): {e}")
+        return False
+
 
 def is_relevant(text):
     return any(kw in text.lower() for kw in RELEVANCE_KEYWORDS)
@@ -63,18 +102,14 @@ def call_llm(prompt):
         "temperature": 0.3
     }
 
-    # Try endpoints in order
     for endpoint in OPENROUTER_ENDPOINTS:
-        for attempt in range(2):  # retry twice per endpoint
+        for attempt in range(2):
             try:
                 print(f"🌐 Trying LLM endpoint: {endpoint} (attempt {attempt+1})")
-
                 resp = requests.post(endpoint, headers=headers, json=payload, timeout=60)
                 resp.raise_for_status()
-
                 data = resp.json()
                 return data["choices"][0]["message"]["content"].strip()
-
             except Exception as e:
                 print(f"⚠️ LLM error on {endpoint} (attempt {attempt+1}): {e}")
                 time.sleep(1)
@@ -155,7 +190,6 @@ def post_to_notion(title, problem, ai_solution, category, industry, source, date
 # ------------------- MAIN -------------------
 def main():
     print("🚀 Starting AI Manufacturing Digest")
-
     seen = set()
 
     for feed_url in FEEDS:
@@ -165,11 +199,29 @@ def main():
             feed = feedparser.parse(feed_url)
 
             for entry in feed.entries[:MAX_ARTICLES_PER_FEED]:
-                title = entry.title.strip()
 
+                title = entry.title.strip()
                 if not title or title in seen:
                     continue
                 seen.add(title)
+
+                # WEEKLY FILTER — skip articles older than 7 days
+                pub = entry.get("published_parsed")
+                if pub:
+                    pub_dt = datetime(*pub[:6])
+                else:
+                    pub_dt = datetime.utcnow()
+
+                if pub_dt < ONE_WEEK_AGO:
+                    print(f"⏭️ Too old (>{7} days): {title}")
+                    continue
+
+                date_str = pub_dt.strftime("%Y-%m-%d")
+
+                # Check for duplicates in Notion
+                if notion_has_article(entry.link, title):
+                    print(f"⏭️ Already exists in Notion: {title}")
+                    continue
 
                 # Extract text
                 text = clean_html(
@@ -178,11 +230,8 @@ def main():
                     entry.get("content", [{}])[0].get("value", "")
                 )
 
-                pub = entry.get("published_parsed")
-                date_str = time.strftime("%Y-%m-%d", pub) if pub else datetime.utcnow().strftime("%Y-%m-%d")
-
                 if not is_relevant(title + " " + text):
-                    print(f"⏭️ Skipped: {title}")
+                    print(f"⏭️ Skipped (not relevant): {title}")
                     continue
 
                 print(f"🧠 Processing: {title}")
