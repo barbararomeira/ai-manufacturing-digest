@@ -31,6 +31,8 @@ FEEDS = [
     "https://techcrunch.com/tag/ai/feed/",
     "https://www.therobotreport.com/feed/",
     "https://www.iotforall.com/feed/",
+    "https://medium.com/feed/@DeloitteUKTechBlog",
+    "https://medium.com/feed/deloitte-digital-connect", 
 ]
 
 MODEL = "tngtech/deepseek-r1t2-chimera:free"
