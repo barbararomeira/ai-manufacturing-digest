@@ -1,6 +1,6 @@
 # 🚀 AI Manufacturing Digest
 
-A GitHub Actions workflow that automatically fetches, summarizes, and saves the latest AI and manufacturing news to Notion.
+A GitHub Actions workflow that automatically fetches, summarizes, and saves the latest AI and manufacturing news to Notion (https://chrome-delphinium-9f8.notion.site/2c2cff9b36e98009a47ac7c472ee795e?v=2c2cff9b36e980e2b250000c504c20ee).
 
 ---
 
