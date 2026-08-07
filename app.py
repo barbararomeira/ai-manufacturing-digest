@@ -336,6 +336,16 @@ def fetch_article_text(url):
 
 
 # ------------------- LLM CALL -------------------
+class LLMUnavailable(Exception):
+    """The model could not be reached. Distinct from the model declining an article.
+
+    Conflating the two is how a total outage disguises itself as 'found nothing this week'."""
+
+
+class RateLimited(LLMUnavailable):
+    """Quota exhausted. Waiting does not help when the limit is per-day."""
+
+
 def call_llm(prompt, model):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -350,22 +360,32 @@ def call_llm(prompt, model):
         "temperature": 0.2,
     }
 
+    rate_limited = False
     for attempt in range(3):
         try:
             resp = requests.post(f"{OPENROUTER_BASE}/chat/completions",
                                  headers=headers, json=payload, timeout=90)
             if resp.status_code == 429:
-                wait = 15 * (attempt + 1)
-                log(f"   ↳ rate limited, waiting {wait}s")
-                time.sleep(wait)
+                rate_limited = True
+                # A per-minute limit clears on its own; a daily quota does not. Retry twice
+                # in case it is the former, then give up rather than burn the whole run.
+                if attempt < 2:
+                    wait = 15 * (attempt + 1)
+                    log(f"   ↳ rate limited, waiting {wait}s")
+                    time.sleep(wait)
                 continue
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
+        except requests.HTTPError as e:
+            log(f"   ↳ LLM HTTP error (attempt {attempt + 1}/3): {str(e)[:120]}")
+            time.sleep(2 * (attempt + 1))
         except Exception as e:
             log(f"   ↳ LLM error (attempt {attempt + 1}/3): {str(e)[:120]}")
             time.sleep(2 * (attempt + 1))
 
-    return None
+    if rate_limited:
+        raise RateLimited("rate limited on every attempt")
+    raise LLMUnavailable("no response after 3 attempts")
 
 
 def parse_json(output):
@@ -425,8 +445,11 @@ TITLE: {title}
 ARTICLE:
 {article_text[:MAX_ARTICLE_CHARS]}"""
 
+    # Deliberately not caught here — an unreachable model must not look like a rejected
+    # article. main() counts it separately and fails the run.
     data = parse_json(call_llm(prompt, model))
     if not data:
+        log("   ↳ skipped: model returned no parseable JSON")
         return None
     if data.get("skip"):
         log(f"   ↳ skipped: {str(data.get('reason', 'not a use case'))[:90]}")
@@ -551,7 +574,9 @@ def main():
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     stats = {"seen": 0, "candidates": 0, "added": 0, "duplicate": 0,
              "irrelevant": 0, "old": 0, "no_use_case": 0, "rejected_title": 0,
-             "notion_failed": 0, "dead_feeds": 0}
+             "llm_failed": 0, "notion_failed": 0, "dead_feeds": 0}
+    consecutive_llm_failures = 0
+    aborted = False
 
     # Everything already filed, plus everything accepted so far this run. Sister publications
     # (The Robot Report and Robotics Business Review, for instance) carry identical stories,
@@ -625,7 +650,21 @@ def main():
                 stats["no_use_case"] += 1
                 continue
 
-            use_case = extract_use_case(text, title, model)
+            try:
+                use_case = extract_use_case(text, title, model)
+            except LLMUnavailable as e:
+                stats["llm_failed"] += 1
+                consecutive_llm_failures += 1
+                log(f"   ⚠️ {e}")
+                # Nothing downstream can succeed while the model is unreachable, and on a
+                # daily quota waiting will not help. Stop rather than repeat it 100 times.
+                if consecutive_llm_failures >= 3:
+                    log("\n❌ The model failed on 3 consecutive articles — aborting.")
+                    aborted = True
+                    break
+                continue
+
+            consecutive_llm_failures = 0
             if use_case is None:
                 stats["no_use_case"] += 1
             elif post_to_notion(title, use_case, link,
@@ -636,6 +675,9 @@ def main():
 
             time.sleep(2)
 
+        if aborted:
+            break
+
     log("\n" + "=" * 52)
     log(f"  Articles seen        {stats['seen']}")
     log(f"  Too old              {stats['old']}")
@@ -644,6 +686,7 @@ def main():
     log(f"  Duplicate story      {stats['duplicate']}")
     log(f"  Analysed             {stats['candidates']}")
     log(f"  No usable use case   {stats['no_use_case']}")
+    log(f"  LLM unavailable      {stats['llm_failed']}")
     log(f"  Notion write failed  {stats['notion_failed']}")
     log(f"  Dead feeds           {stats['dead_feeds']}")
     log(f"  ✅ ADDED             {stats['added']}")
@@ -657,12 +700,19 @@ def main():
 
     # Fail loudly. The previous version swallowed every error and exited 0, so GitHub
     # reported success every Monday while writing nothing to Notion for months.
+    if stats["llm_failed"]:
+        log(f"\n❌ The model was unavailable for {stats['llm_failed']} article(s).")
+        log("   If these were rate limits, the free-tier quota is exhausted. Free models on")
+        log("   OpenRouter allow ~50 requests/day; adding $10 of credit raises it to ~1000.")
+        return 1
     if stats["notion_failed"] and not stats["added"]:
         log("\n❌ Every Notion write failed — check NOTION_TOKEN and database permissions.")
         return 1
+    # Not a failure on its own: a week with no genuine deployment stories is plausible, and
+    # the skip reasons above say why each article was declined.
     if stats["candidates"] and not stats["added"]:
-        log("\n❌ Analysed articles but added nothing — the model or prompt is failing.")
-        return 1
+        log("\n⚠️ Analysed articles but added none — check the skip reasons above.")
+        log("   If they look wrong, the skip rules in extract_use_case() are too strict.")
     if stats["dead_feeds"] > len(FEEDS) // 2:
         log("\n❌ More than half the feeds returned nothing.")
         return 1

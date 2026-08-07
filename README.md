@@ -56,6 +56,19 @@ nothing usable exists, the run fails instead of quietly writing nothing.
 
 ---
 
+## ⏱️ Rate limits
+
+Free OpenRouter models allow roughly **50 requests per day** on accounts holding less than
+$10 of credit, rising to about **1000 per day** above that threshold. A normal weekly run
+analyses 15–30 articles, so the free tier is sufficient for the schedule — but it leaves
+almost no headroom for testing, and three runs in one afternoon will exhaust it.
+
+If you plan to iterate on the prompt, either add $10 of credit once or spread runs across
+days. When the quota is gone the run aborts after three consecutive failures rather than
+grinding through every feed, and reports `LLM unavailable` — never `no usable use case`.
+
+---
+
 ## 🔔 Failure behaviour
 
 The first version caught every exception and always exited 0, so Actions reported a green
@@ -64,9 +77,14 @@ exits non-zero when:
 
 - a required secret is missing
 - no usable model can be resolved
-- articles were analysed but nothing was added
+- the model was unavailable for any article (rate limits, outages)
 - every Notion write failed
 - more than half the feeds returned nothing
+
+A model outage is counted and reported separately from an article the model declined.
+Collapsing the two is how "the API is down" disguises itself as "nothing newsworthy this
+week" — analysing articles and adding none is a warning, not a failure, because a quiet week
+is plausible; being unable to reach the model never is.
 
 Each run ends with a summary table (seen / skipped / analysed / added) so a silent drift to
 zero is visible at a glance.
