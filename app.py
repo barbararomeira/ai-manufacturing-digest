@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import html
+import socket
 import difflib
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +18,10 @@ from bs4 import BeautifulSoup
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY", "").strip()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
+
+# Print what would be written instead of writing it. Use this to tune the prompt or the
+# vocabulary without adding rows you then have to delete.
+DRY_RUN = os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 # Verified live 2026-08-07. Dead feeds are removed rather than left to fail silently.
 FEEDS = [
@@ -32,7 +37,6 @@ FEEDS = [
     "https://www.supplychaindive.com/feeds/news/",
     "https://venturebeat.com/category/ai/feed",
     "https://techcrunch.com/tag/ai/feed/",
-    "https://arstechnica.com/ai/feed/",
     "https://www.zdnet.com/topic/artificial-intelligence/rss.xml",
     "https://www.forbes.com/innovation/feed2/",
     "https://blogs.nvidia.com/feed/",
@@ -59,6 +63,10 @@ PREFERRED_MODELS = [
 ]
 # Specialised models that cannot do general JSON extraction well.
 MODEL_EXCLUDE = ("content-safety", "-code", "-vl", "guard", "embed", "tiny", "-xs-")
+
+# feedparser has no timeout argument and will hang indefinitely on a stalled host;
+# one such feed cost a run two minutes before returning nothing.
+socket.setdefaulttimeout(30)
 
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -362,6 +370,13 @@ def notion_has(title, url):
 
 
 def post_to_notion(title, use_case, source, date_str):
+    if DRY_RUN:
+        log(f"   📝 [dry run] would add: {title[:80]}")
+        log(f"      Problem : {use_case['problem']}")
+        log(f"      Solution: {use_case['ai_solution']}")
+        log(f"      Tags    : {use_case['category']} / {use_case['industry']}")
+        return True
+
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": {
@@ -390,7 +405,7 @@ def post_to_notion(title, use_case, source, date_str):
 
 # ------------------- MAIN -------------------
 def main():
-    log("🚀 AI Manufacturing Digest")
+    log("🚀 AI Manufacturing Digest" + (" — DRY RUN (nothing will be written)" if DRY_RUN else ""))
 
     missing = [n for n, v in [("OPENROUTER_KEY", OPENROUTER_KEY),
                               ("NOTION_TOKEN", NOTION_TOKEN),
@@ -446,7 +461,9 @@ def main():
                 stats["irrelevant"] += 1
                 continue
 
-            if notion_has(title, link):
+            # In a dry run we want to see extractions for everything, including rows already
+            # filed, so the dedup check is bypassed.
+            if not DRY_RUN and notion_has(title, link):
                 stats["duplicate"] += 1
                 log(f"   ⏭️ Already in Notion: {title[:70]}")
                 continue
