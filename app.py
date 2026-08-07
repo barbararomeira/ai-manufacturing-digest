@@ -111,28 +111,37 @@ INDUSTRY_SIGNALS = [
 # Headlines that are never a use case. Rejecting these on the title alone avoids spending an
 # LLM call to be told "this is a funding round" — which is what happened to roughly a third
 # of the articles that reached the model.
+#
+# Deliberately narrow. A title gate cannot tell a hollow op-ed from one built around a real
+# deployment, and guessing costs more than it saves: "Why perception is the key to scaling
+# industrial autonomy" reads like pure thought leadership but carried a fully specified ASI
+# mining deployment with hard numbers. Judging substance needs the article body, so that call
+# belongs to the model. Only shapes that are *definitionally* not use cases belong here.
 TITLE_REJECT = [
     # money and corporate events
-    r"\braise[sd]?\s+\$", r"\bsecure[sd]?\s+\$", r"\bfunding\b", r"\bseries\s+[a-f]\b",
-    r"\bvaluation\b", r"\bipo\b", r"\bacqui(?:re|res|red|sition)\b", r"\bmerger\b",
-    r"\bearnings\b", r"\brevenue\b", r"\bq[1-4]\s+(?:results|profit|sales)\b",
-    r"\bsales\s+(?:surpass|rise|climb|jump|top)\b", r"\bstock\b", r"\bshares\b",
-    r"\bappoint(?:s|ed)?\b", r"\bnames?\s+new\s+(?:ceo|cto|president)\b",
+    r"\braise[sd]?\s+\$", r"\bsecure[sd]?\s+\$", r"\bfunding\s+round\b",
+    r"\bseries\s+[a-f]\s+(?:funding|round)\b", r"\bvaluation\b", r"\bipo\b",
+    r"\bacquires?\b", r"\bacquired\s+by\b", r"\bto\s+acquire\b", r"\bacquisition\s+of\b",
+    r"\bmerger\b", r"\bearnings\b", r"\bq[1-4]\s+(?:results|profit|sales|revenue)\b",
+    r"\bsales\s+(?:surpass|rise|climb|jump|top)\b",
+    r"\b(?:stock|share)\s+price\b", r"\bstock\s+(?:surges|jumps|falls|slides)\b",
+    r"\bappoint(?:s|ed)\b", r"\bnames?\s+new\s+(?:ceo|cto|coo|president|chair)\b",
     r"\bsteps?\s+down\b", r"\bjoins\s+board\b",
     # media, events, marketing
     r"^\s*podcast\b", r"\bpodcast\s*\|", r"\bwebinar\b", r"\bto\s+host\b",
-    r"\bconference\b", r"\btrade\s+show\b", r"\bexhibit(?:s|ing)?\b",
-    r"\bwins?\s+award\b", r"\bawarded\b", r"\bcelebrat(?:es|ing)\b",
-    r"\bnamed\s+(?:one\s+of\s+)?(?:the\s+)?(?:best|top)\b", r"\bsponsor(?:s|ed)\b",
+    r"\btrade\s+show\b", r"\bexhibit(?:s|ing)\s+at\b",
+    r"\bwins?\s+award\b", r"\bwins?\s+.*\bprize\b", r"\bcelebrat(?:es|ing)\b",
+    r"\bnamed\s+(?:one\s+of\s+)?(?:the\s+)?(?:best|top)\b",
     # policy, education, research programmes
-    r"\bcourse\b", r"\bcurriculum\b", r"\bscholarship\b", r"\bfellowship\b",
-    r"\bjoins\s+.*\bprogram\b", r"\bpropose[sd]?\s+.*\bguidelines\b",
+    r"\b(?:course|webinar|workshop)\s+(?:teaches|covers|explores)\b",
+    r"\b(?:online|training|short)\s+course\b", r"\bcurriculum\b", r"\bscholarship\b",
+    r"\bjoins\s+.*\bprogram(?:me)?\b", r"\bpropose[sd]?\s+.*\bguidelines\b",
     r"\bwhite\s+paper\b", r"\bsurvey\s+(?:finds|shows|reveals)\b",
-    r"\breport\s+(?:looks|finds|shows|reveals)\b", r"\bmarket\s+(?:to\s+reach|size|forecast)\b",
-    r"\bopens\s+new\s+.*\b(?:lab|center|centre|facility)\b",
-    # vendor thought-leadership
-    r"^why\s+", r"^how\s+.*\bcan\b", r"^the\s+future\s+of\b", r"^what\s+.*\bmeans\s+for\b",
-    r"^\d+\s+(?:ways|things|trends|reasons)\b", r"\bpredictions\s+for\b",
+    r"\breport\s+(?:looks|finds|shows|reveals)\b",
+    r"\bmarket\s+(?:to\s+reach|size|forecast)\b",
+    r"\bopens\s+new\s+.*\b(?:lab|center|centre|facility|campus)\b",
+    # listicles and forecasts — no specific deployment behind them
+    r"^\d+\s+(?:ways|things|trends|reasons|predictions)\b", r"\bpredictions\s+for\s+20\d\d\b",
 ]
 TITLE_REJECT_RE = [(re.compile(p, re.IGNORECASE), p) for p in TITLE_REJECT]
 
