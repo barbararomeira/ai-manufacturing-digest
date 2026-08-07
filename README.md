@@ -1,111 +1,101 @@
 # 🚀 AI Manufacturing Digest
 
-A GitHub Actions workflow that automatically fetches, summarizes, and saves the latest AI and manufacturing news to Notion.
+A GitHub Actions workflow that fetches manufacturing and AI news each week, extracts concrete
+AI use cases with an LLM, and files them into a Notion database.
 
----
-
-## 📷 Demo
-
-Here’s a demo of the AI Manufacturing Digest in action [Link to notion: https://chrome-delphinium-9f8.notion.site/2c2cff9b36e98009a47ac7c472ee795e?v=2c2cff9b36e980e2b250000c504c20ee]:
+[View the Notion table →](https://chrome-delphinium-9f8.notion.site/2c2cff9b36e98009a47ac7c472ee795e?v=2c2cff9b36e980e2b250000c504c20ee)
 
 ![AI Manufacturing Digest Demo](assets/demo.png)
 
 ---
 
-## 📡 Features
+## 📡 How it works
 
-- Aggregates news from multiple manufacturing and AI-related RSS feeds.
-- Filters articles based on relevance, publication date, and duplicates.
-- Uses an LLM (via OpenRouter API) to extract AI use cases or summarize articles.
-- Automatically adds processed summaries to a Notion database.
-- Runs on a daily schedule or manually via workflow dispatch.
-- Gracefully handles feed errors or LLM failures to avoid workflow crashes.
+1. Pulls entries from 19 RSS feeds (manufacturing, robotics, and AI press).
+2. Drops anything older than 7 days, already in Notion, or failing the relevance gate.
+3. **Fetches the full article body** — not just the RSS excerpt — and sends that to the model.
+4. Asks the model for a specific problem / solution pair, or to skip the article entirely.
+5. Snaps the returned tags onto a controlled vocabulary and writes the row to Notion.
 
----
-
-## 📡 RSS Feeds
-
-Some of the feeds included:
- - Industry 4.0
- - Manufacturing Dive
- - VentureBeat AI
- - IEEE Spectrum Robotics
- - Automation World
- - Robotics Business Review
- - IoT For All
- - Plus 15+ more industrial and AI news sources.
-
-(You can customize or expand this list in summarize.py)
+Runs every Monday at 15:00 UTC, or on demand via **Actions → Run workflow**.
 
 ---
 
 ## 🛠️ Setup
 
-### 1. Clone the repo
-git clone https://github.com/yourusername/ai-manufacturing-digest.git
-cd ai-manufacturing-digest
+Add three repository secrets under **Settings → Secrets and variables → Actions**:
 
-## 2. Set up GitHub secrets
+| Secret | What it is |
+|---|---|
+| `OPENROUTER_KEY` | OpenRouter API key |
+| `NOTION_TOKEN` | Notion internal integration token |
+| `NOTION_DATABASE_ID` | Target Notion database ID |
 
-Go to your repository Settings → Secrets → Actions and add:
- - OPENROUTER_KEY – Your OpenRouter API key
- - NOTION_TOKEN – Your Notion integration token
- - NOTION_DATABASE_ID – The database ID where summaries will be saved
+The Notion database needs these properties: `Title` (title), `Problem` (text),
+`AI Solution` (text), `Category` (multi-select), `Industry` (multi-select),
+`Source` (url), `Date` (date).
 
-## 3. Python Dependencies
+Run locally with:
 
-The workflow installs dependencies automatically, but you can also run locally:
-pip install feedparser requests beautifulsoup4
-
----
-
-## 🏃 Running the Workflow
-
-Manual run
- - Go to the Actions tab on GitHub.
- - Select the AI Manufacturing Digest workflow and click Run workflow.
-
-Scheduled run
- - The workflow runs daily at 15:00 UTC by default (cron: '0 15 * * *').
- - You can adjust the schedule in .github/workflows/ai-manufacturing-digest.yml.
+```bash
+pip install -r requirements.txt
+OPENROUTER_KEY=... NOTION_TOKEN=... NOTION_DATABASE_ID=... python app.py
+```
 
 ---
 
-## 🔧 Workflow Steps
+## 🤖 Model selection
 
-1. Checkout repository
-2. Install Python (3.10)
-3. Install dependencies (feedparser, requests, beautifulsoup4)
-4. DNS check for OpenRouter API (helps catch network issues early)
-5. Run summarize.py to process feeds and add entries to Notion
+The digest uses free OpenRouter models. **Free models get retired without notice** — this is
+what silently broke the pipeline for months when `tngtech/deepseek-r1t2-chimera:free`
+disappeared and every request began returning 404.
 
----
-
-## ⚠️ Troubleshooting
-
-1. LLM connection errors: Failed to resolve 'api.openrouter.ai' 
- - Check internet connectivity or DNS.
- - Make sure your OpenRouter API key is valid.
- - Retry later if hitting rate limits (429 errors).
-2. Older articles skipped: By default, articles older than 7 days are ignored. Adjust this in summarize.py.
-3. Duplicate or irrelevant articles: Skipped automatically.
+`resolve_model()` now guards against that: it queries OpenRouter's live catalogue at startup,
+walks `PREFERRED_MODELS` in order, and falls back to any capable free model still listed. If
+nothing usable exists, the run fails instead of quietly writing nothing.
 
 ---
 
-## 📝 Customization
- - Add or remove RSS feeds in summarize.py under the feeds list.
- - Change relevance rules or keywords in summarize.py.
- - Modify Notion database structure to include custom properties (title, summary, link, date, etc.).
+## 🔔 Failure behaviour
+
+The first version caught every exception and always exited 0, so Actions reported a green
+tick every Monday while adding zero rows to Notion. That is no longer possible — the run
+exits non-zero when:
+
+- a required secret is missing
+- no usable model can be resolved
+- articles were analysed but nothing was added
+- every Notion write failed
+- more than half the feeds returned nothing
+
+Each run ends with a summary table (seen / skipped / analysed / added) so a silent drift to
+zero is visible at a glance.
+
+---
+
+## 🏷️ Tag hygiene
+
+`Category` and `Industry` are restricted to the controlled vocabularies defined at the top of
+`app.py`. The model is instructed to pick from those lists, and `snap_tags()` maps anything
+off-list onto the nearest canonical term (or drops it).
+
+This exists because free-form tagging had grown the database to 65 `Category` and 51
+`Industry` options full of near-duplicates — `predictive_maintenance` vs
+`Predictive Maintenance`, `computer vision` vs `computer_vision`. New rows are consistent;
+the historical options can be merged in Notion at your convenience.
+
+---
+
+## 📝 Customising
+
+- **Feeds** — edit `FEEDS`. Dead feeds are reported in the run summary rather than ignored.
+- **Vocabulary** — edit `CATEGORIES` / `INDUSTRIES`; the prompt is built from them.
+- **Strictness** — the skip rules live in the prompt inside `extract_use_case()`.
+- **Window** — `LOOKBACK_DAYS` (default 7, matching the weekly schedule).
 
 ---
 
 ## 📦 Requirements
- - Python 3.10+
- - GitHub repository with Actions enabled
- - Notion account with integration access
- - OpenRouter API key (or other LLM endpoint)
 
-## 🔗 References
- - Notion API
- - OpenRouter API
- - GitHub Actions documentation
+Python 3.12, GitHub Actions, a Notion integration with access to the target database, and an
+OpenRouter API key.
