@@ -108,6 +108,41 @@ INDUSTRY_SIGNALS = [
     "aerospace", "semiconductor", "industry 4.0", "iiot", "oee", "throughput",
 ]
 
+# Headlines that are never a use case. Rejecting these on the title alone avoids spending an
+# LLM call to be told "this is a funding round" — which is what happened to roughly a third
+# of the articles that reached the model.
+TITLE_REJECT = [
+    # money and corporate events
+    r"\braise[sd]?\s+\$", r"\bsecure[sd]?\s+\$", r"\bfunding\b", r"\bseries\s+[a-f]\b",
+    r"\bvaluation\b", r"\bipo\b", r"\bacqui(?:re|res|red|sition)\b", r"\bmerger\b",
+    r"\bearnings\b", r"\brevenue\b", r"\bq[1-4]\s+(?:results|profit|sales)\b",
+    r"\bsales\s+(?:surpass|rise|climb|jump|top)\b", r"\bstock\b", r"\bshares\b",
+    r"\bappoint(?:s|ed)?\b", r"\bnames?\s+new\s+(?:ceo|cto|president)\b",
+    r"\bsteps?\s+down\b", r"\bjoins\s+board\b",
+    # media, events, marketing
+    r"^\s*podcast\b", r"\bpodcast\s*\|", r"\bwebinar\b", r"\bto\s+host\b",
+    r"\bconference\b", r"\btrade\s+show\b", r"\bexhibit(?:s|ing)?\b",
+    r"\bwins?\s+award\b", r"\bawarded\b", r"\bcelebrat(?:es|ing)\b",
+    r"\bnamed\s+(?:one\s+of\s+)?(?:the\s+)?(?:best|top)\b", r"\bsponsor(?:s|ed)\b",
+    # policy, education, research programmes
+    r"\bcourse\b", r"\bcurriculum\b", r"\bscholarship\b", r"\bfellowship\b",
+    r"\bjoins\s+.*\bprogram\b", r"\bpropose[sd]?\s+.*\bguidelines\b",
+    r"\bwhite\s+paper\b", r"\bsurvey\s+(?:finds|shows|reveals)\b",
+    r"\breport\s+(?:looks|finds|shows|reveals)\b", r"\bmarket\s+(?:to\s+reach|size|forecast)\b",
+    r"\bopens\s+new\s+.*\b(?:lab|center|centre|facility)\b",
+    # vendor thought-leadership
+    r"^why\s+", r"^how\s+.*\bcan\b", r"^the\s+future\s+of\b", r"^what\s+.*\bmeans\s+for\b",
+    r"^\d+\s+(?:ways|things|trends|reasons)\b", r"\bpredictions\s+for\b",
+]
+TITLE_REJECT_RE = [(re.compile(p, re.IGNORECASE), p) for p in TITLE_REJECT]
+
+# Words carrying no identity, dropped before comparing two headlines.
+TITLE_STOPWORDS = {
+    "a", "an", "the", "to", "of", "in", "on", "at", "for", "with", "and", "or", "as",
+    "is", "are", "be", "by", "from", "its", "it", "up", "new", "that", "this", "will",
+    "has", "have", "how", "why", "what", "s",
+}
+
 
 # ------------------- HELPERS -------------------
 def log(msg):
@@ -125,6 +160,64 @@ def has_signal(text, signals):
 def is_relevant(text):
     t = text.lower()
     return has_signal(t, AI_SIGNALS) and has_signal(t, INDUSTRY_SIGNALS)
+
+
+def title_rejected(title):
+    """Return the pattern that disqualifies this headline, or None."""
+    for regex, pattern in TITLE_REJECT_RE:
+        if regex.search(title):
+            return pattern
+    return None
+
+
+def title_key(title):
+    """Normalised headline used for exact and fuzzy comparison."""
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    return " ".join(w for w in words if w not in TITLE_STOPWORDS)
+
+
+def money_tokens(title):
+    """Normalise monetary amounts so '$900M' and 'Up to $900 Million' both yield '900m'.
+
+    Two outlets covering the same deal almost always quote the same figure, which makes this
+    a far stronger same-story signal than the headline wording."""
+    tokens = set()
+    for value, scale in re.findall(
+        r"\$?\s*(\d[\d.,]*)\s*(million|billion|trillion|m|b|t)\b", title, re.IGNORECASE
+    ):
+        tokens.add(f"{value.replace(',', '').rstrip('.')}{scale[0].lower()}")
+    return tokens
+
+
+CAPS_NOISE = {"million", "billion", "trillion", "up", "new", "the", "and", "for", "with",
+              "how", "why", "what", "its", "into", "over", "from", "says", "said"}
+
+
+def org_tokens(title):
+    """Capitalised words likely to name an organisation.
+
+    The leading word must be kept, not skipped as a sentence-case artefact — in a headline it
+    is usually the subject, and dropping it lost the "HII" that identified two reports of the
+    same deal as the same story."""
+    words = re.findall(r"\b[A-Z][A-Za-z&.]{1,}\b", title)
+    return {w.lower().rstrip(".") for w in words
+            if len(w) > 2 and w.lower().rstrip(".") not in CAPS_NOISE}
+
+
+def is_same_story(title_a, title_b):
+    """Detect the same story republished under a different headline."""
+    key_a, key_b = title_key(title_a), title_key(title_b)
+    if not key_a or not key_b:
+        return False
+    if key_a == key_b:
+        return True
+    if difflib.SequenceMatcher(None, key_a, key_b).ratio() >= 0.72:
+        return True
+    # Same organisation and same headline figure — e.g. the HII / $900M deal, which appeared
+    # under two different headlines and produced two near-identical Notion rows.
+    shared_money = money_tokens(title_a) & money_tokens(title_b)
+    shared_orgs = org_tokens(title_a) & org_tokens(title_b)
+    return bool(shared_money and shared_orgs)
 
 
 def stem_words(text):
@@ -289,12 +382,17 @@ def extract_use_case(article_text, title, model):
 
 Return ONLY a JSON object.
 
+The bar is a DEPLOYMENT: a named organisation applying AI to a specific operational problem, where the article says enough about what was built to be useful to someone evaluating the same idea. Announcements about the future do not qualify.
+
 Skip the article — return {{"skip": true, "reason": "..."}} — if ANY of these are true:
-- It is a funding round, acquisition, earnings report, or executive appointment with no described application
-- It is a product launch or partnership announcement with no described problem being solved
-- It is opinion, survey, prediction, market-sizing, or policy commentary
-- The AI is consumer-facing or non-industrial (chatbots, marketing, search)
-- You cannot identify a specific operational problem it addresses
+- It is a funding round, acquisition, contract award, earnings report, or executive appointment. A large monetary figure in the headline is a strong signal of this.
+- It describes an intention, commitment, roadmap, or partnership rather than something already running ("will deploy", "plans to", "aims to", "has committed to")
+- It is a product launch, model release, or platform announcement, even when it names industrial applications
+- It is opinion, analysis, thought leadership, or a vendor explainer. Headlines shaped like "Why X matters" or "How X is changing Y" are almost always this.
+- It is a survey, market forecast, research report summary, policy commentary, conference item, or educational programme
+- It is about building a factory, lab, or data centre, rather than about AI running inside one
+- The AI is consumer-facing or non-industrial (chatbots, marketing, search, finance)
+- You cannot name the organisation actually using the AI, or cannot identify the specific operational problem it addresses
 
 Otherwise return:
 {{
@@ -350,23 +448,46 @@ def notion_headers():
     }
 
 
-def notion_has(title, url):
-    """Check by title AND source URL — the same story is often re-titled across feeds."""
+def load_recent_entries(days=45):
+    """Fetch recent titles and source URLs in one pass.
+
+    Replaces a per-article query, and more importantly gives every candidate something to be
+    fuzzy-matched against — an exact-title lookup could never catch the same story
+    republished under a different headline."""
     query = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
-    payload = {
-        "filter": {"or": [
-            {"property": "Title", "title": {"equals": title[:100]}},
-            {"property": "Source", "url": {"equals": url}},
-        ]},
-        "page_size": 1,
-    }
-    try:
-        resp = requests.post(query, headers=notion_headers(), json=payload, timeout=30)
-        resp.raise_for_status()
-        return bool(resp.json().get("results"))
-    except Exception as e:
-        log(f"⚠️ Notion duplicate check failed: {str(e)[:120]}")
-        return False
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    titles, urls, cursor = [], set(), None
+
+    for _ in range(10):  # cap pagination
+        payload = {
+            "filter": {"property": "Date", "date": {"on_or_after": since}},
+            "page_size": 100,
+        }
+        if cursor:
+            payload["start_cursor"] = cursor
+        try:
+            resp = requests.post(query, headers=notion_headers(), json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            log(f"⚠️ Could not load recent Notion entries: {str(e)[:120]}")
+            return titles, urls
+
+        for page in data.get("results", []):
+            props = page.get("properties", {})
+            title_parts = props.get("Title", {}).get("title", [])
+            if title_parts:
+                titles.append("".join(p.get("plain_text", "") for p in title_parts))
+            source = props.get("Source", {}).get("url")
+            if source:
+                urls.add(source)
+
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    log(f"🗂️  Loaded {len(titles)} entries from the last {days} days for duplicate checking")
+    return titles, urls
 
 
 def post_to_notion(title, use_case, source, date_str):
@@ -420,8 +541,14 @@ def main():
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     stats = {"seen": 0, "candidates": 0, "added": 0, "duplicate": 0,
-             "irrelevant": 0, "old": 0, "no_use_case": 0, "llm_failed": 0,
+             "irrelevant": 0, "old": 0, "no_use_case": 0, "rejected_title": 0,
              "notion_failed": 0, "dead_feeds": 0}
+
+    # Everything already filed, plus everything accepted so far this run. Sister publications
+    # (The Robot Report and Robotics Business Review, for instance) carry identical stories,
+    # so without an in-run record the same article is analysed and filed twice.
+    known_titles, known_urls = load_recent_entries()
+    rejected_examples = []
 
     for feed_url in FEEDS:
         log(f"\n📡 {feed_url}")
@@ -461,12 +588,23 @@ def main():
                 stats["irrelevant"] += 1
                 continue
 
-            # In a dry run we want to see extractions for everything, including rows already
-            # filed, so the dedup check is bypassed.
-            if not DRY_RUN and notion_has(title, link):
-                stats["duplicate"] += 1
-                log(f"   ⏭️ Already in Notion: {title[:70]}")
+            # Cheap gates first — no LLM call is spent on a headline that cannot be a use case.
+            pattern = title_rejected(title)
+            if pattern:
+                stats["rejected_title"] += 1
+                if len(rejected_examples) < 12:
+                    rejected_examples.append(f"{title[:70]}  [{pattern}]")
                 continue
+
+            if link in known_urls or any(is_same_story(title, k) for k in known_titles):
+                stats["duplicate"] += 1
+                log(f"   ⏭️ Already covered: {title[:70]}")
+                continue
+
+            # Claim it now so a sister publication's copy is skipped later in this same run,
+            # whether or not this one ends up being filed.
+            known_titles.append(title)
+            known_urls.add(link)
 
             stats["candidates"] += 1
             log(f"   🧠 {title[:80]}")
@@ -493,13 +631,20 @@ def main():
     log(f"  Articles seen        {stats['seen']}")
     log(f"  Too old              {stats['old']}")
     log(f"  Not relevant         {stats['irrelevant']}")
-    log(f"  Already in Notion    {stats['duplicate']}")
+    log(f"  Rejected on title    {stats['rejected_title']}")
+    log(f"  Duplicate story      {stats['duplicate']}")
     log(f"  Analysed             {stats['candidates']}")
     log(f"  No usable use case   {stats['no_use_case']}")
     log(f"  Notion write failed  {stats['notion_failed']}")
     log(f"  Dead feeds           {stats['dead_feeds']}")
     log(f"  ✅ ADDED             {stats['added']}")
     log("=" * 52)
+
+    # Surfaced so an over-eager pattern is visible rather than silently eating good articles.
+    if rejected_examples:
+        log("\nRejected on title (tune TITLE_REJECT if any of these look wrong):")
+        for example in rejected_examples:
+            log(f"  · {example}")
 
     # Fail loudly. The previous version swallowed every error and exited 0, so GitHub
     # reported success every Monday while writing nothing to Notion for months.
