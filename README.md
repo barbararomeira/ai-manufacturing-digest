@@ -56,16 +56,35 @@ nothing usable exists, the run fails instead of quietly writing nothing.
 
 ---
 
-## ⏱️ Rate limits
+## ⏱️ Working within the free tier
 
-Free OpenRouter models allow roughly **50 requests per day** on accounts holding less than
-$10 of credit, rising to about **1000 per day** above that threshold. A normal weekly run
-analyses 15–30 articles, so the free tier is sufficient for the schedule — but it leaves
-almost no headroom for testing, and three runs in one afternoon will exhaust it.
+This project runs on free OpenRouter models only, which allow roughly **50 requests per day**.
+That is a hard design constraint, not a temporary state, so the pipeline budgets its calls.
 
-If you plan to iterate on the prompt, either add $10 of credit once or spread runs across
-days. When the quota is gone the run aborts after three consecutive failures rather than
-grinding through every feed, and reports `LLM unavailable` — never `no usable use case`.
+A typical week yields ~140 articles, which the free filters reduce to **~17 candidates** —
+comfortably inside the quota. `MAX_LLM_CALLS` (default **25**) caps a run regardless, so no
+single run can exhaust the day's allowance.
+
+When candidates exceed the budget, they are ranked by `deployment_score()` and the best ones
+are analysed first. The score is computed from the title and RSS excerpt at no cost, and
+rewards concrete figures (percentages, hours, tons), deployment verbs ("deploys", "cuts",
+"automates"), and named AI techniques, while penalising announcement language ("launches",
+"partners", "plans to"). Candidates left unanalysed are counted as `Over budget` in the
+summary.
+
+Ranking is why candidates are gathered from every feed *before* any analysis begins.
+Processing feed-by-feed would let the first feeds spend the whole budget, and the feeds at the
+end of the list would never be analysed at all.
+
+Two runs a day is the practical ceiling. For cheap iteration, run with a small budget:
+
+```bash
+MAX_LLM_CALLS=3 DRY_RUN=1 python app.py
+```
+
+Both are exposed as `workflow_dispatch` inputs. When the quota is gone the run aborts after
+three consecutive failures rather than grinding through every feed, and reports
+`LLM unavailable` — never `no usable use case`.
 
 ---
 

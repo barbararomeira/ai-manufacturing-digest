@@ -9,6 +9,10 @@ on:
         description: 'Preview extractions in the log without writing to Notion'
         type: boolean
         default: false
+      max_llm_calls:
+        description: 'Model call budget for this run (free tier allows ~50/day)'
+        type: string
+        default: '25'
 
 jobs:
   digest:
@@ -32,4 +36,5 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           DRY_RUN: ${{ inputs.dry_run }}
+          MAX_LLM_CALLS: ${{ inputs.max_llm_calls || '25' }}
         run: python app.py

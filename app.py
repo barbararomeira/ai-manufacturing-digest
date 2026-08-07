@@ -50,6 +50,11 @@ MAX_ARTICLES_PER_FEED = 8
 LOOKBACK_DAYS = 7
 MAX_ARTICLE_CHARS = 12000
 
+# Hard ceiling on model calls per run. Free OpenRouter models allow roughly 50 requests a day,
+# and that is the budget this project lives within — so a run must never be able to spend it
+# all. Candidates are ranked and the budget goes to the best ones; see deployment_score().
+MAX_LLM_CALLS = int(os.getenv("MAX_LLM_CALLS", "25"))
+
 # Free models get retired without notice — that is what silently killed this pipeline for
 # months. Rather than hardcode one, we resolve against OpenRouter's live catalogue at startup
 # and fall back to any capable free model still standing.
@@ -227,6 +232,53 @@ def is_same_story(title_a, title_b):
     shared_money = money_tokens(title_a) & money_tokens(title_b)
     shared_orgs = org_tokens(title_a) & org_tokens(title_b)
     return bool(shared_money and shared_orgs)
+
+
+# Signals that an article describes a real deployment, used to rank candidates when there are
+# more of them than the call budget allows. Free to compute, unlike asking the model.
+DEPLOY_VERBS = [
+    "deploy", "deployed", "deploys", "install", "installed", "rolled out", "rollout",
+    "implement", "implemented", "uses", "using", "adopted", "runs", "running",
+    "cut", "cuts", "reduced", "reduces", "improved", "improves", "boosted",
+    "automates", "automated", "detects", "predicts", "inspect",
+]
+STRONG_AI_TERMS = [
+    "computer vision", "machine learning", "predictive maintenance", "digital twin",
+    "defect detection", "anomaly detection", "quality inspection", "neural network",
+    "reinforcement learning", "vision system", "generative design",
+]
+SITE_TERMS = ["plant", "factory", "line", "facility", "shop floor", "warehouse", "site", "mill"]
+ANNOUNCEMENT_VERBS = ["launch", "launches", "unveil", "unveils", "introduc", "announc",
+                      "releases", "release of", "partners", "partnership", "plans to",
+                      "will deploy", "aims to", "to build", "set to"]
+
+
+def deployment_score(title, excerpt):
+    """Rank how likely an article is to describe a real, already-running deployment.
+
+    A weekly run turns up more candidates than the free-tier quota can analyse, so the budget
+    goes to the strongest ones rather than to whichever feed happens to be listed first."""
+    title_l, text_l = title.lower(), f"{title} {excerpt}".lower()
+    score = 0
+
+    # Concrete numbers are the single best predictor of a substantive article.
+    if re.search(r"\d+\s*%", text_l):
+        score += 3
+    if re.search(
+        r"\b\d+(?:\.\d+)?\s*(?:million|billion|hours?|days?|seconds?|minutes?|tons?|tonnes?"
+        r"|units?|parts?|miles?|km|kg|cycles?|defects?|welds?)\b", text_l
+    ):
+        score += 2
+
+    score += 2 * min(2, sum(1 for v in DEPLOY_VERBS if re.search(rf"\b{v}\b", title_l)))
+    score += sum(1 for t in STRONG_AI_TERMS if t in text_l)
+    score += 1 if any(re.search(rf"\b{s}\b", text_l) for s in SITE_TERMS) else 0
+
+    # Announcements dress up as deployments; push them below genuine ones rather than
+    # dropping them, since occasionally one does describe a working system.
+    score -= 2 * min(2, sum(1 for v in ANNOUNCEMENT_VERBS if v in title_l))
+
+    return score
 
 
 def stem_words(text):
@@ -584,8 +636,13 @@ def main():
     known_titles, known_urls = load_recent_entries()
     rejected_examples = []
 
+    # ---- Pass 1: gather candidates across every feed, using only free checks ----
+    # Collecting first (rather than analysing as we go) is what makes the call budget fair.
+    # Processing feed-by-feed would let the earliest feeds spend the entire budget, so the
+    # last feeds in the list would never be analysed at all.
+    candidates = []
     for feed_url in FEEDS:
-        log(f"\n📡 {feed_url}")
+        log(f"📡 {feed_url}")
         try:
             feed = feedparser.parse(feed_url, agent=BROWSER_UA)
         except Exception as e:
@@ -622,61 +679,77 @@ def main():
                 stats["irrelevant"] += 1
                 continue
 
-            # Cheap gates first — no LLM call is spent on a headline that cannot be a use case.
             pattern = title_rejected(title)
             if pattern:
                 stats["rejected_title"] += 1
-                if len(rejected_examples) < 12:
-                    rejected_examples.append(f"{title[:70]}  [{pattern}]")
+                # Sister publications carry the same headline, and the title gate runs before
+                # the duplicate check, so collapse repeats to keep the audit readable.
+                example = f"{title[:70]}  [{pattern}]"
+                if example not in rejected_examples and len(rejected_examples) < 12:
+                    rejected_examples.append(example)
                 continue
 
             if link in known_urls or any(is_same_story(title, k) for k in known_titles):
                 stats["duplicate"] += 1
-                log(f"   ⏭️ Already covered: {title[:70]}")
                 continue
 
             # Claim it now so a sister publication's copy is skipped later in this same run,
-            # whether or not this one ends up being filed.
+            # whether or not this one ends up being analysed.
             known_titles.append(title)
             known_urls.add(link)
+            candidates.append({
+                "title": title, "link": link, "excerpt": excerpt,
+                "date": published_dt.strftime("%Y-%m-%d"),
+                "score": deployment_score(title, excerpt),
+            })
 
-            stats["candidates"] += 1
-            log(f"   🧠 {title[:80]}")
+    # ---- Pass 2: spend the budget on the most promising candidates ----
+    candidates.sort(key=lambda c: -c["score"])
+    budget = candidates[:MAX_LLM_CALLS]
+    stats["over_budget"] = len(candidates) - len(budget)
 
-            body = fetch_article_text(link)
-            text = body if len(body) > len(excerpt) else excerpt
-            if len(text) < 200:
-                log("   ↳ skipped: not enough text to analyse")
-                stats["no_use_case"] += 1
-                continue
+    log(f"\n🎯 {len(candidates)} candidates; analysing the top {len(budget)} "
+        f"(budget {MAX_LLM_CALLS} calls)")
+    if stats["over_budget"]:
+        log(f"   {stats['over_budget']} left unanalysed this run — lowest-scoring first.")
 
-            try:
-                use_case = extract_use_case(text, title, model)
-            except LLMUnavailable as e:
-                stats["llm_failed"] += 1
-                consecutive_llm_failures += 1
-                log(f"   ⚠️ {e}")
-                # Nothing downstream can succeed while the model is unreachable, and on a
-                # daily quota waiting will not help. Stop rather than repeat it 100 times.
-                if consecutive_llm_failures >= 3:
-                    log("\n❌ The model failed on 3 consecutive articles — aborting.")
-                    aborted = True
-                    break
-                continue
+    for item in budget:
+        stats["candidates"] += 1
+        log(f"\n🧠 [{item['score']:+d}] {item['title'][:80]}")
 
-            consecutive_llm_failures = 0
-            if use_case is None:
-                stats["no_use_case"] += 1
-            elif post_to_notion(title, use_case, link,
-                                published_dt.strftime("%Y-%m-%d")):
-                stats["added"] += 1
-            else:
-                stats["notion_failed"] += 1
+        body = fetch_article_text(item["link"])
+        text = body if len(body) > len(item["excerpt"]) else item["excerpt"]
+        if len(text) < 200:
+            log("   ↳ skipped: not enough text to analyse")
+            stats["no_use_case"] += 1
+            continue
 
-            time.sleep(2)
+        try:
+            use_case = extract_use_case(text, item["title"], model)
+        except LLMUnavailable as e:
+            stats["llm_failed"] += 1
+            consecutive_llm_failures += 1
+            log(f"   ⚠️ {e}")
+            # Nothing downstream can succeed while the model is unreachable, and on a
+            # daily quota waiting will not help. Stop rather than repeat it 100 times.
+            if consecutive_llm_failures >= 3:
+                log("\n❌ The model failed on 3 consecutive articles — aborting.")
+                aborted = True
+                break
+            continue
 
-        if aborted:
-            break
+        consecutive_llm_failures = 0
+        if use_case is None:
+            stats["no_use_case"] += 1
+        elif post_to_notion(item["title"], use_case, item["link"], item["date"]):
+            stats["added"] += 1
+        else:
+            stats["notion_failed"] += 1
+
+        time.sleep(2)
+
+    if aborted:
+        log("   (remaining candidates skipped)")
 
     log("\n" + "=" * 52)
     log(f"  Articles seen        {stats['seen']}")
@@ -684,6 +757,7 @@ def main():
     log(f"  Not relevant         {stats['irrelevant']}")
     log(f"  Rejected on title    {stats['rejected_title']}")
     log(f"  Duplicate story      {stats['duplicate']}")
+    log(f"  Over budget          {stats.get('over_budget', 0)}")
     log(f"  Analysed             {stats['candidates']}")
     log(f"  No usable use case   {stats['no_use_case']}")
     log(f"  LLM unavailable      {stats['llm_failed']}")
