@@ -330,32 +330,33 @@ def snap_tags(raw_tags, vocabulary, limit=3):
 
 
 # ------------------- MODEL RESOLUTION -------------------
-def resolve_model():
-    """Pick a free model that actually exists right now."""
+def resolve_models():
+    """Ordered pool of free models that exist right now, best first."""
     try:
         resp = requests.get(f"{OPENROUTER_BASE}/models", timeout=30)
         resp.raise_for_status()
         available = {m["id"] for m in resp.json().get("data", [])}
     except Exception as e:
         log(f"❌ Could not reach OpenRouter model catalogue: {e}")
-        return None
+        return []
 
-    for model in PREFERRED_MODELS:
-        if model in available:
-            log(f"🤖 Model: {model}")
-            return model
-
-    fallback = sorted(
+    # A pool, not a single choice. Appearing in the catalogue only means the model exists —
+    # a free model can still return 404 "no endpoints" mid-run when no provider is currently
+    # serving it, which is what happened on 2026-08-10. call_llm falls through the pool.
+    pool = [m for m in PREFERRED_MODELS if m in available]
+    pool += sorted(
         m for m in available
-        if m.endswith(":free") and not any(x in m.lower() for x in MODEL_EXCLUDE)
+        if m.endswith(":free")
+        and m not in pool
+        and not any(x in m.lower() for x in MODEL_EXCLUDE)
     )
-    if fallback:
-        log(f"⚠️ No preferred model available — falling back to {fallback[0]}")
-        log("   Consider updating PREFERRED_MODELS in app.py.")
-        return fallback[0]
 
-    log("❌ No usable free model found on OpenRouter.")
-    return None
+    if not pool:
+        log("❌ No usable free model found on OpenRouter.")
+        return []
+
+    log(f"🤖 Model: {pool[0]}  ({len(pool) - 1} fallbacks available)")
+    return pool
 
 
 # ------------------- ARTICLE FETCHING -------------------
@@ -398,46 +399,76 @@ class RateLimited(LLMUnavailable):
     """Quota exhausted. Waiting does not help when the limit is per-day."""
 
 
-def call_llm(prompt, model):
+def call_llm(prompt, models):
+    """Try each model in the pool until one answers.
+
+    `models` is mutated: a model with no serving provider is dropped for the rest of the run
+    rather than retried on every article."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/barbararomeira/ai-manufacturing-digest",
         "X-Title": "AI Manufacturing Digest",
     }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
-        "temperature": 0.2,
-    }
-
     rate_limited = False
-    for attempt in range(3):
-        try:
-            resp = requests.post(f"{OPENROUTER_BASE}/chat/completions",
-                                 headers=headers, json=payload, timeout=90)
-            if resp.status_code == 429:
-                rate_limited = True
-                # A per-minute limit clears on its own; a daily quota does not. Retry twice
-                # in case it is the former, then give up rather than burn the whole run.
-                if attempt < 2:
-                    wait = 15 * (attempt + 1)
-                    log(f"   ↳ rate limited, waiting {wait}s")
-                    time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-        except requests.HTTPError as e:
-            log(f"   ↳ LLM HTTP error (attempt {attempt + 1}/3): {str(e)[:120]}")
-            time.sleep(2 * (attempt + 1))
-        except Exception as e:
-            log(f"   ↳ LLM error (attempt {attempt + 1}/3): {str(e)[:120]}")
-            time.sleep(2 * (attempt + 1))
+    last_error = "no models left in the pool"
+
+    for model in list(models):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1500,
+            "temperature": 0.2,
+        }
+
+        for attempt in range(2):
+            try:
+                resp = requests.post(f"{OPENROUTER_BASE}/chat/completions",
+                                     headers=headers, json=payload, timeout=90)
+
+                if resp.status_code == 429:
+                    rate_limited = True
+                    last_error = "rate limited"
+                    # A per-minute limit clears on its own; a daily quota does not.
+                    if attempt == 0:
+                        log("   ↳ rate limited, waiting 20s")
+                        time.sleep(20)
+                        continue
+                    break  # try the next model rather than waiting again
+
+                # 404 means the model is catalogued but no provider is serving it. Retrying
+                # is pointless; drop it for this run and move on.
+                if resp.status_code == 404:
+                    log(f"   ↳ {model} has no available provider — dropping it for this run")
+                    if model in models:
+                        models.remove(model)
+                    last_error = f"{model}: no provider"
+                    break
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                # OpenRouter can answer 200 with an error body and no choices. Reading
+                # ["choices"] blindly raised a bare KeyError('choices') that said nothing
+                # about the real cause.
+                if "choices" not in data:
+                    err = data.get("error")
+                    detail = (err.get("message") if isinstance(err, dict) else err) or str(data)[:160]
+                    log(f"   ↳ {model} returned no choices: {str(detail)[:140]}")
+                    last_error = str(detail)[:160]
+                    time.sleep(2)
+                    continue
+
+                return data["choices"][0]["message"]["content"].strip()
+
+            except Exception as e:
+                last_error = str(e)[:160]
+                log(f"   ↳ {model} error (attempt {attempt + 1}/2): {last_error[:120]}")
+                time.sleep(2 * (attempt + 1))
 
     if rate_limited:
-        raise RateLimited("rate limited on every attempt")
-    raise LLMUnavailable("no response after 3 attempts")
+        raise RateLimited("rate limited on every model")
+    raise LLMUnavailable(f"no model answered ({last_error})")
 
 
 def parse_json(output):
@@ -458,7 +489,7 @@ def parse_json(output):
 
 
 # ------------------- USE CASE EXTRACTION -------------------
-def extract_use_case(article_text, title, model):
+def extract_use_case(article_text, title, models):
     prompt = f"""You are a manufacturing AI analyst. Analyse the article below and decide whether it describes a CONCRETE application of AI in an industrial or manufacturing setting.
 
 Return ONLY a JSON object.
@@ -499,7 +530,7 @@ ARTICLE:
 
     # Deliberately not caught here — an unreachable model must not look like a rejected
     # article. main() counts it separately and fails the run.
-    data = parse_json(call_llm(prompt, model))
+    data = parse_json(call_llm(prompt, models))
     if not data:
         log("   ↳ skipped: model returned no parseable JSON")
         return None
@@ -619,8 +650,8 @@ def main():
         log(f"❌ Missing environment variables: {', '.join(missing)}")
         return 1
 
-    model = resolve_model()
-    if not model:
+    models = resolve_models()
+    if not models:
         return 1
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
@@ -725,7 +756,7 @@ def main():
             continue
 
         try:
-            use_case = extract_use_case(text, item["title"], model)
+            use_case = extract_use_case(text, item["title"], models)
         except LLMUnavailable as e:
             stats["llm_failed"] += 1
             consecutive_llm_failures += 1
@@ -774,11 +805,18 @@ def main():
 
     # Fail loudly. The previous version swallowed every error and exited 0, so GitHub
     # reported success every Monday while writing nothing to Notion for months.
-    if stats["llm_failed"]:
-        log(f"\n❌ The model was unavailable for {stats['llm_failed']} article(s).")
-        log("   If these were rate limits, the free-tier quota is exhausted. Free models on")
-        log("   OpenRouter allow ~50 requests/day; adding $10 of credit raises it to ~1000.")
+    # Free models drop in and out, so an occasional failure is normal and must not fail a run
+    # that otherwise worked. Only a substantial share signals a real outage.
+    failure_share = stats["llm_failed"] / max(1, stats["candidates"])
+    if stats["llm_failed"] and failure_share >= 0.5:
+        log(f"\n❌ The model was unavailable for {stats['llm_failed']} of "
+            f"{stats['candidates']} articles.")
+        log("   If these were rate limits, the free-tier daily quota is exhausted;")
+        log("   free models allow roughly 50 requests a day. Otherwise the pool is down.")
         return 1
+    if stats["llm_failed"]:
+        log(f"\n⚠️ {stats['llm_failed']} of {stats['candidates']} articles could not be "
+            f"analysed — free models drop in and out. The rest of the run was unaffected.")
     if stats["notion_failed"] and not stats["added"]:
         log("\n❌ Every Notion write failed — check NOTION_TOKEN and database permissions.")
         return 1
