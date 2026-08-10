@@ -95,6 +95,22 @@ CATEGORIES = [
     "Edge Computing", "Industrial IoT", "Additive Manufacturing", "AI Infrastructure",
     "Process Automation", "Inventory Management", "Demand Forecasting", "Yield Optimization",
 ]
+# How far along the use case is. Written to an optional "Stage" select property, so the
+# strongest entries can be filtered out from the merely announced ones — the bar admits
+# pilots and launches, and prose alone buried that distinction.
+STAGES = ["Deployed", "Pilot", "Announced"]
+# Phrasings the model reaches for instead of the three labels. Without these, "in production"
+# falls through to the conservative default and understates a real deployment.
+STAGE_ALIASES = {
+    "in production": "Deployed", "production": "Deployed", "live": "Deployed",
+    "rolled out": "Deployed", "rollout": "Deployed", "operational": "Deployed",
+    "in use": "Deployed", "scaled": "Deployed",
+    "trial": "Pilot", "trialled": "Pilot", "testing": "Pilot", "poc": "Pilot",
+    "proof of concept": "Pilot", "piloting": "Pilot", "early deployment": "Pilot",
+    "planned": "Announced", "launch": "Announced", "launched": "Announced",
+    "upcoming": "Announced", "partnership": "Announced", "development": "Announced",
+}
+
 INDUSTRIES = [
     "Automotive", "Aerospace", "Defense", "Electronics", "Semiconductor Manufacturing",
     "Pharmaceuticals", "Life Sciences", "Medical Devices", "Food and Beverage",
@@ -518,8 +534,15 @@ Otherwise return:
   "problem": "The specific operational problem, in 2-3 sentences. Name the company/plant and include concrete details from the article — the defect rate, downtime hours, cycle time, headcount, cost, or scale involved. State the stage plainly if it is not yet in production, e.g. 'currently in pilot at...', 'shipping in 2027'. Do NOT write generic statements like 'manufacturers face quality challenges'.",
   "ai_solution": "What was actually built and how it works, in 2-3 sentences. Name the technique (e.g. vision-based anomaly detection, time-series forecasting on vibration sensors) and the measured result if the article gives one. Do NOT write 'they used AI to improve efficiency'.",
   "category": ["pick 1-3 from the CATEGORY list"],
-  "industry": ["pick 1-2 from the INDUSTRY list"]
+  "industry": ["pick 1-2 from the INDUSTRY list"],
+  "stage": "one of: Deployed | Pilot | Announced"
 }}
+
+Stage means:
+- "Deployed": running in production at a named organisation, at scale or across sites
+- "Pilot": trialled at a real site, or a limited/early deployment still being proven
+- "Announced": launched, planned, or partnered, but not yet shown running anywhere
+Choose the most conservative option the article actually supports.
 
 CATEGORY list (use these exact strings): {", ".join(CATEGORIES)}
 
@@ -555,11 +578,15 @@ ARTICLE:
         log("   ↳ skipped: extraction too thin to be useful")
         return None
 
+    raw_stage = str(data.get("stage") or "").strip().lower()
+    stage = snap_tags([STAGE_ALIASES.get(raw_stage, raw_stage)], STAGES, limit=1)
     return {
         "problem": problem[:1900],
         "ai_solution": solution[:1900],
         "category": snap_tags(data.get("category"), CATEGORIES),
         "industry": snap_tags(data.get("industry"), INDUSTRIES) or ["General Manufacturing"],
+        # Default to the most conservative reading when the model omits or garbles it.
+        "stage": stage[0] if stage else "Announced",
     }
 
 
@@ -570,6 +597,22 @@ def notion_headers():
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28",
     }
+
+
+def notion_properties():
+    """Property names present on the database.
+
+    Lets an optional column like Stage be written when it exists and skipped when it does
+    not, instead of every write failing with 'Stage is not a property that exists' until the
+    column is added by hand."""
+    try:
+        resp = requests.get(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+                            headers=notion_headers(), timeout=30)
+        resp.raise_for_status()
+        return set(resp.json().get("properties", {}))
+    except Exception as e:
+        log(f"⚠️ Could not read the Notion schema: {str(e)[:120]}")
+        return set()
 
 
 def load_recent_entries(days=45):
@@ -614,9 +657,10 @@ def load_recent_entries(days=45):
     return titles, urls
 
 
-def post_to_notion(title, use_case, source, date_str):
+def post_to_notion(title, use_case, source, date_str, properties=frozenset()):
     if DRY_RUN:
         log(f"   📝 [dry run] would add: {title[:80]}")
+        log(f"      Stage   : {use_case['stage']}")
         log(f"      Problem : {use_case['problem']}")
         log(f"      Solution: {use_case['ai_solution']}")
         log(f"      Tags    : {use_case['category']} / {use_case['industry']}")
@@ -634,6 +678,11 @@ def post_to_notion(title, use_case, source, date_str):
             "Date": {"date": {"start": date_str}},
         },
     }
+    # Written only once the column exists, so adding it in Notion is optional and can happen
+    # at any time without a coordinated deploy.
+    if "Stage" in properties:
+        payload["properties"]["Stage"] = {"select": {"name": use_case["stage"]}}
+
     try:
         resp = requests.post("https://api.notion.com/v1/pages",
                              headers=notion_headers(), json=payload, timeout=30)
@@ -673,6 +722,12 @@ def main():
     # Everything already filed, plus everything accepted so far this run. Sister publications
     # (The Robot Report and Robotics Business Review, for instance) carry identical stories,
     # so without an in-run record the same article is analysed and filed twice.
+    schema = notion_properties()
+    if "Stage" in schema:
+        log("🏷️  Stage column found — recording deployment stage")
+    else:
+        log("🏷️  No Stage column in Notion — skipping that field (add it to enable)")
+
     known_titles, known_urls = load_recent_entries()
     rejected_examples = []
 
@@ -781,7 +836,7 @@ def main():
         consecutive_llm_failures = 0
         if use_case is None:
             stats["no_use_case"] += 1
-        elif post_to_notion(item["title"], use_case, item["link"], item["date"]):
+        elif post_to_notion(item["title"], use_case, item["link"], item["date"], schema):
             stats["added"] += 1
         else:
             stats["notion_failed"] += 1

@@ -2,7 +2,10 @@ name: AI Manufacturing Digest
 
 on:
   schedule:
-    - cron: '0 15 * * 1'   # Every Monday at 15:00 UTC
+    # Monday and Thursday. Each run needs ~25 model calls against a ~50/day free-tier quota,
+    # so the two must fall on different days. A shorter gap also means fewer stories aging
+    # out of the 7-day lookback window before a run sees them.
+    - cron: '0 15 * * 1,4'
   workflow_dispatch:
     inputs:
       dry_run:
