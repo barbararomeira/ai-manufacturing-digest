@@ -11,13 +11,13 @@ AI use cases with an LLM, and files them into a Notion database.
 
 ## 📡 How it works
 
-1. Pulls entries from 19 RSS feeds (manufacturing, robotics, and AI press).
+1. Pulls entries from 18 RSS feeds (manufacturing, robotics, and AI press).
 2. Drops anything older than 7 days, already in Notion, or failing the relevance gate.
 3. **Fetches the full article body** — not just the RSS excerpt — and sends that to the model.
 4. Asks the model for a specific problem / solution pair, or to skip the article entirely.
 5. Snaps the returned tags onto a controlled vocabulary and writes the row to Notion.
 
-Runs every Monday at 15:00 UTC, or on demand via **Actions → Run workflow**.
+Runs **Monday and Thursday at 15:00 UTC**, or on demand via **Actions → Run workflow**.
 
 ---
 
@@ -35,6 +35,10 @@ The Notion database needs these properties: `Title` (title), `Problem` (text),
 `AI Solution` (text), `Category` (multi-select), `Industry` (multi-select),
 `Source` (url), `Date` (date).
 
+Optionally add `Stage` (select) to record how far along each use case is — `Deployed`,
+`Pilot` or `Announced`. The script reads the schema at startup and writes the field only when
+the column exists, so it can be added at any time without touching the code.
+
 Run locally with:
 
 ```bash
@@ -50,9 +54,13 @@ The digest uses free OpenRouter models. **Free models get retired without notice
 what silently broke the pipeline for months when `tngtech/deepseek-r1t2-chimera:free`
 disappeared and every request began returning 404.
 
-`resolve_model()` now guards against that: it queries OpenRouter's live catalogue at startup,
-walks `PREFERRED_MODELS` in order, and falls back to any capable free model still listed. If
-nothing usable exists, the run fails instead of quietly writing nothing.
+`resolve_models()` returns a *pool*, not a single choice: it queries the live catalogue at
+startup, orders it by `PREFERRED_MODELS`, and appends any other capable free model.
+
+A pool is necessary because being listed only means a model exists. A free model still returns
+`404 no endpoints` when no provider is currently serving it, which happened mid-run on
+2026-08-10. `call_llm()` falls through the pool and drops a model with no provider for the rest
+of the run, rather than retrying it on every article.
 
 ---
 
@@ -96,7 +104,7 @@ exits non-zero when:
 
 - a required secret is missing
 - no usable model can be resolved
-- the model was unavailable for any article (rate limits, outages)
+- the model was unavailable for at least half the analysed articles
 - every Notion write failed
 - more than half the feeds returned nothing
 
@@ -127,6 +135,11 @@ This exists because free-form tagging had grown the database to 65 `Category` an
 `Predictive Maintenance`, `computer vision` vs `computer_vision`. New rows are consistent;
 the historical options can be merged in Notion at your convenience.
 
+Fuzzy matching uses a 0.92 cutoff, not a looser one. These terms differ by a single
+distinguishing word, so a low threshold compares mostly the shared remainder and conflates
+opposites: `adaptive manufacturing` scored 0.909 against `Additive Manufacturing`. Real typos
+score above 0.93. Fuzzy matching should forgive spelling, never substitute a concept.
+
 ---
 
 ## 📝 Customising
@@ -134,7 +147,9 @@ the historical options can be merged in Notion at your convenience.
 - **Feeds** — edit `FEEDS`. Dead feeds are reported in the run summary rather than ignored.
 - **Vocabulary** — edit `CATEGORIES` / `INDUSTRIES`; the prompt is built from them.
 - **Strictness** — the skip rules live in the prompt inside `extract_use_case()`.
-- **Window** — `LOOKBACK_DAYS` (default 7, matching the weekly schedule).
+- **Window** — `LOOKBACK_DAYS` (default 7; runs twice weekly, so entries overlap deliberately).
+- **Cadence** — the `schedule` cron in the workflow. Keep runs on separate days: each needs
+  ~25 model calls against a ~50/day quota.
 
 ---
 
