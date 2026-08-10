@@ -46,7 +46,11 @@ FEEDS = [
 ]
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-MAX_ARTICLES_PER_FEED = 8
+# Pass 1 reads only the RSS excerpt, so a high cap costs nothing but parsing time — the spend
+# ceiling is MAX_LLM_CALLS. At 8 this silently discarded 73 fresh articles a week, mostly from
+# the manufacturing feeds (Assembly, RoboticsTomorrow, The Robot Report). Raising it to 30
+# takes candidates from 19 to 33, so the ranker picks the best 25 instead of taking all there is.
+MAX_ARTICLES_PER_FEED = 30
 LOOKBACK_DAYS = 7
 MAX_ARTICLE_CHARS = 12000
 
