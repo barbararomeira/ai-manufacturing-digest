@@ -130,6 +130,11 @@ uses — the technique belongs in the `AI Solution` text, where it can be stated
 long list fragments the table: when three tags are all plausible for one article, no two rows
 tag alike and filtering by Category stops meaning anything.
 
+[`docs/notion-tag-cleanup.md`](docs/notion-tag-cleanup.md) lists the merges that collapse the
+historical options onto this vocabulary — generated from the same `snap_tags()` logic, so the
+cleanup and future rows agree. Notion merges two select options when you rename one to exactly
+match the other.
+
 This exists because free-form tagging had grown the database to 65 `Category` and 51
 `Industry` options full of near-duplicates — `predictive_maintenance` vs
 `Predictive Maintenance`, `computer vision` vs `computer_vision`. New rows are consistent;
