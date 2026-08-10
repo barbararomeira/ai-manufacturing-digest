@@ -274,9 +274,9 @@ def deployment_score(title, excerpt):
     score += sum(1 for t in STRONG_AI_TERMS if t in text_l)
     score += 1 if any(re.search(rf"\b{s}\b", text_l) for s in SITE_TERMS) else 0
 
-    # Announcements dress up as deployments; push them below genuine ones rather than
-    # dropping them, since occasionally one does describe a working system.
-    score -= 2 * min(2, sum(1 for v in ANNOUNCEMENT_VERBS if v in title_l))
+    # Announcements are ranked below running deployments but only mildly, since a launch or
+    # pilot now qualifies when the article explains the mechanism.
+    score -= min(2, sum(1 for v in ANNOUNCEMENT_VERBS if v in title_l))
 
     return score
 
@@ -494,21 +494,22 @@ def extract_use_case(article_text, title, models):
 
 Return ONLY a JSON object.
 
-The bar is a DEPLOYMENT: a named organisation applying AI to a specific operational problem, where the article says enough about what was built to be useful to someone evaluating the same idea. Announcements about the future do not qualify.
+The bar is TECHNICAL SUBSTANCE, not maturity. A use case qualifies when the article explains both the industrial problem being addressed and how the AI actually works. It may be running in production, in pilot, part of a partnership, or a newly launched product — any of those is fine, provided the substance is there.
 
 Skip the article — return {{"skip": true, "reason": "..."}} — if ANY of these are true:
-- It is a funding round, acquisition, contract award, earnings report, or executive appointment. A large monetary figure in the headline is a strong signal of this.
-- It describes an intention, commitment, roadmap, or partnership rather than something already running ("will deploy", "plans to", "aims to", "has committed to")
-- It is a product launch, model release, or platform announcement, even when it names industrial applications
-- It is opinion, analysis, thought leadership, or a vendor explainer. Headlines shaped like "Why X matters" or "How X is changing Y" are almost always this.
-- It is a survey, market forecast, research report summary, policy commentary, conference item, or educational programme
-- It is about building a factory, lab, or data centre, rather than about AI running inside one
+- There is no technical substance: you cannot say what the system does or how it works, only that it exists or is coming
+- It is only a funding round, acquisition, earnings report, or executive appointment, with no description of the technology itself
+- It is a survey, market forecast, research report, policy or regulatory commentary, conference write-up, podcast, or educational programme
+- It is a general-purpose model, chip, or infrastructure release with no specific industrial application described
+- It is about constructing a factory, lab, or data centre, rather than about AI applied to production
 - The AI is consumer-facing or non-industrial (chatbots, marketing, search, finance)
-- You cannot name the organisation actually using the AI, or cannot identify the specific operational problem it addresses
+- You cannot name the organisation building or using the AI
+
+Judge substance, not tense. "Will deploy", "is piloting" and "has launched" all qualify when the mechanism is explained. A vendor explainer qualifies if it describes a real system at a named organisation. Reject vagueness, not the future.
 
 Otherwise return:
 {{
-  "problem": "The specific operational problem, in 2-3 sentences. Name the company/plant and include concrete details from the article — the defect rate, downtime hours, cycle time, headcount, cost, or scale involved. Do NOT write generic statements like 'manufacturers face quality challenges'.",
+  "problem": "The specific operational problem, in 2-3 sentences. Name the company/plant and include concrete details from the article — the defect rate, downtime hours, cycle time, headcount, cost, or scale involved. State the stage plainly if it is not yet in production, e.g. 'currently in pilot at...', 'shipping in 2027'. Do NOT write generic statements like 'manufacturers face quality challenges'.",
   "ai_solution": "What was actually built and how it works, in 2-3 sentences. Name the technique (e.g. vision-based anomaly detection, time-series forecasting on vibration sensors) and the measured result if the article gives one. Do NOT write 'they used AI to improve efficiency'.",
   "category": ["pick 1-3 from the CATEGORY list"],
   "industry": ["pick 1-2 from the INDUSTRY list"]
