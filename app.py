@@ -322,7 +322,12 @@ def snap_tags(raw_tags, vocabulary, limit=3):
         match = canonical.get(key)
 
         if not match:  # near-miss spelling
-            close = difflib.get_close_matches(key, canonical.keys(), n=1, cutoff=0.82)
+            # 0.92, not 0.82. Terms here differ by a single distinguishing word, so a loose
+            # threshold silently conflates opposites: "adaptive manufacturing" scored 0.909
+            # against "Additive Manufacturing", and "AI in Manufacturing" 0.829. Real typos
+            # ("compter vision", "quality controll") score 0.93 and above, so this separates
+            # them with margin. Only spelling slips should pass — never a different concept.
+            close = difflib.get_close_matches(key, canonical.keys(), n=1, cutoff=0.92)
             match = canonical[close[0]] if close else None
 
         if not match:  # one is a word-subset of the other, e.g. "automotive manufacturing"
