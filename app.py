@@ -86,14 +86,22 @@ BROWSER_UA = (
 # Free-form tagging grew the Notion database to 65 Category and 51 Industry options full of
 # near-duplicates (predictive_maintenance vs Predictive Maintenance). The model must now pick
 # from these lists, and anything off-list is snapped to the nearest match or dropped.
+# Kept deliberately small. These describe what the AI is FOR, not which technique it uses —
+# the technique belongs in the AI Solution text, where it can be stated precisely. A long list
+# fragments the table: three plausible tags for one article means no two rows tag alike, and
+# filtering by Category stops meaning anything.
 CATEGORIES = [
-    "Predictive Maintenance", "Quality Control", "Defect Detection", "Computer Vision",
-    "Robotics", "Collaborative Robotics", "Autonomous Systems", "Warehouse Automation",
-    "Process Optimization", "Production Planning", "Supply Chain", "Energy Management",
-    "Generative Design", "Simulation", "Digital Twin", "Machine Learning",
-    "AI Assistant", "Workforce Development", "Safety", "Cybersecurity",
-    "Edge Computing", "Industrial IoT", "Additive Manufacturing", "AI Infrastructure",
-    "Process Automation", "Inventory Management", "Demand Forecasting", "Yield Optimization",
+    "Predictive Maintenance",     # condition monitoring, failure prediction, asset health
+    "Quality & Inspection",       # defect detection, visual inspection, yield
+    "Computer Vision",            # kept separate: the most common sensing approach by far
+    "Robotics & Automation",      # robots, cobots, autonomous vehicles, pick-and-place
+    "Process Optimization",       # scheduling, planning, throughput, parameter tuning
+    "Supply Chain & Logistics",   # forecasting, inventory, warehousing, routing
+    "Simulation & Digital Twin",  # digital twins, generative design, virtual commissioning
+    "Workforce & Safety",         # training, assistance, ergonomics, hazard detection
+    "Energy Management",          # consumption, efficiency, emissions
+    "Cybersecurity",              # OT/ICS security, threat detection
+    "AI Infrastructure",          # edge compute, IIoT platforms, MLOps, data plumbing
 ]
 # How far along the use case is. Written to an optional "Stage" select property, so the
 # strongest entries can be filtered out from the merely announced ones — the bar admits
@@ -112,12 +120,79 @@ STAGE_ALIASES = {
 }
 
 INDUSTRIES = [
-    "Automotive", "Aerospace", "Defense", "Electronics", "Semiconductor Manufacturing",
-    "Pharmaceuticals", "Life Sciences", "Medical Devices", "Food and Beverage",
-    "Consumer Goods", "Chemicals", "Metals and Mining", "Energy", "Utilities",
-    "Construction", "Logistics", "Warehousing", "Shipbuilding", "Textiles",
-    "Industrial Equipment", "General Manufacturing", "Technology", "Robotics",
+    "Automotive", "Aerospace & Defense", "Electronics & Semiconductors",
+    "Pharma & Medical", "Food & Beverage", "Consumer Goods", "Chemicals",
+    "Metals & Mining", "Energy & Utilities", "Logistics & Warehousing",
+    "Construction", "Industrial Equipment", "General Manufacturing",
 ]
+
+# With a short vocabulary, a plausible tag like "Defect Detection" no longer matches anything
+# and would be dropped without trace. These fold the common vocabulary into the new groups.
+# Technique names (Machine Learning, NLP, Deep Learning) are intentionally absent: they are
+# not applications, and belong in the AI Solution text.
+CATEGORY_ALIASES = {
+    "quality control": "Quality & Inspection", "defect detection": "Quality & Inspection",
+    "inspection": "Quality & Inspection", "visual inspection": "Quality & Inspection",
+    "anomaly detection": "Quality & Inspection", "yield optimization": "Quality & Inspection",
+    "autonomous inspection": "Quality & Inspection",
+    "robotics": "Robotics & Automation", "collaborative robotics": "Robotics & Automation",
+    "cobots": "Robotics & Automation", "autonomous systems": "Robotics & Automation",
+    "process automation": "Robotics & Automation", "automation": "Robotics & Automation",
+    "autonomous robots": "Robotics & Automation", "autonomous vehicles": "Robotics & Automation",
+    "material handling": "Robotics & Automation", "precision assembly": "Robotics & Automation",
+    "autonomous robotics": "Robotics & Automation", "cognitive robotics": "Robotics & Automation",
+    "swarm intelligence": "Robotics & Automation", "industrial automation": "Robotics & Automation",
+    "supply chain optimization": "Supply Chain & Logistics",
+    "warehouse automation": "Supply Chain & Logistics",
+    "inventory management": "Supply Chain & Logistics",
+    "demand forecasting": "Supply Chain & Logistics", "supply chain": "Supply Chain & Logistics",
+    "logistics": "Supply Chain & Logistics", "logistics automation": "Supply Chain & Logistics",
+    "production planning": "Process Optimization", "scheduling": "Process Optimization",
+    "production optimization": "Process Optimization", "efficiency": "Process Optimization",
+    "operational efficiency": "Process Optimization", "cost reduction": "Process Optimization",
+    "production scaling": "Process Optimization", "labor optimization": "Process Optimization",
+    "digital twin": "Simulation & Digital Twin", "simulation": "Simulation & Digital Twin",
+    "generative design": "Simulation & Digital Twin",
+    "design optimization": "Simulation & Digital Twin",
+    "safety": "Workforce & Safety", "workforce": "Workforce & Safety",
+    "workforce development": "Workforce & Safety", "ai assistant": "Workforce & Safety",
+    "human robot collaboration": "Workforce & Safety",
+    "human machine interaction": "Workforce & Safety",
+    "edge computing": "AI Infrastructure", "industrial iot": "AI Infrastructure",
+    "iiot": "AI Infrastructure", "data management": "AI Infrastructure",
+    "data collection": "AI Infrastructure",
+    "threat detection": "Cybersecurity",
+    "asset management": "Predictive Maintenance", "condition monitoring": "Predictive Maintenance",
+}
+INDUSTRY_ALIASES = {
+    "aerospace": "Aerospace & Defense", "defense": "Aerospace & Defense",
+    "aerospace manufacturing": "Aerospace & Defense", "shipbuilding": "Aerospace & Defense",
+    "electronics": "Electronics & Semiconductors",
+    "semiconductors": "Electronics & Semiconductors",
+    "semiconductor manufacturing": "Electronics & Semiconductors",
+    "consumer electronics": "Electronics & Semiconductors",
+    "electronics manufacturing": "Electronics & Semiconductors",
+    "pharmaceuticals": "Pharma & Medical", "pharmaceutical manufacturing": "Pharma & Medical",
+    "life sciences": "Pharma & Medical", "medical devices": "Pharma & Medical",
+    "medical": "Pharma & Medical", "biotech": "Pharma & Medical",
+    "healthcare": "Pharma & Medical",
+    "food and beverage": "Food & Beverage", "food manufacturing": "Food & Beverage",
+    "food and consumer goods": "Food & Beverage",
+    "fast moving consumer goods": "Consumer Goods", "furniture": "Consumer Goods",
+    "furniture manufacturing": "Consumer Goods", "textiles": "Consumer Goods",
+    "chemical manufacturing": "Chemicals",
+    "mining": "Metals & Mining", "metals": "Metals & Mining",
+    "energy": "Energy & Utilities", "utilities": "Energy & Utilities",
+    "water treatment": "Energy & Utilities",
+    "logistics": "Logistics & Warehousing", "warehousing": "Logistics & Warehousing",
+    "industrial logistics": "Logistics & Warehousing", "e commerce": "Logistics & Warehousing",
+    "electric vehicles": "Automotive", "automotive manufacturing": "Automotive",
+    "robotics": "Industrial Equipment", "industrial automation": "Industrial Equipment",
+    "industrial equipment": "Industrial Equipment",
+    "manufacturing": "General Manufacturing", "industrial manufacturing": "General Manufacturing",
+    "custom manufacturing": "General Manufacturing", "custom fabrication": "General Manufacturing",
+    "micromanufacturing": "General Manufacturing",
+}
 
 # Relevance gate: an article must show BOTH an AI signal and an industrial signal.
 # The old single list matched on "ai " alone and let a lot of noise through.
@@ -306,20 +381,35 @@ def stem_words(text):
     return {w[:-1] if len(w) > 4 and w.endswith("s") else w for w in text.split()}
 
 
-def snap_tags(raw_tags, vocabulary, limit=3):
+def norm_tag(text):
+    """One normal form for canonical names, aliases and model output alike.
+
+    Folds case, underscores, hyphens, and both spellings of "and" — so "Aerospace & Defense",
+    "aerospace and defense" and "aerospace_defense" are the same key. Applying different
+    normalisation to the vocabulary than to the input is how a lookup silently misses."""
+    key = re.sub(r"[_\-]+", " ", str(text)).lower()
+    key = re.sub(r"\s*&\s*", " ", key)
+    key = re.sub(r"\band\b", " ", key)
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def snap_tags(raw_tags, vocabulary, limit=3, aliases=None):
     """Map model output onto the controlled vocabulary; drop anything with no close match.
 
-    Handles the three ways a model drifts off-list: casing/underscores
-    ("predictive_maintenance"), extra words ("automotive manufacturing"), and
-    abbreviation ("pharma")."""
-    canonical = {v.lower(): v for v in vocabulary}
+    Handles the ways a model drifts off-list: casing/underscores
+    ("predictive_maintenance"), extra words ("automotive manufacturing"), abbreviation
+    ("pharma"), and retired terms that must fold into a surviving group ("defect detection")."""
+    canonical = {norm_tag(v): v for v in vocabulary}
+    alias_map = {norm_tag(k): v for k, v in (aliases or {}).items()}
     out = []
     for tag in raw_tags or []:
-        key = re.sub(r"[_\-]+", " ", str(tag)).strip().lower()
+        key = norm_tag(tag)
         if not key:
             continue
 
-        match = canonical.get(key)
+        # Aliases first: a retired term must land on its designated replacement, not be
+        # fuzzy-matched to whichever survivor happens to look similar.
+        match = alias_map.get(key) or canonical.get(key)
 
         if not match:  # near-miss spelling
             # 0.92, not 0.82. Terms here differ by a single distinguishing word, so a loose
@@ -588,8 +678,9 @@ ARTICLE:
     return {
         "problem": problem[:1900],
         "ai_solution": solution[:1900],
-        "category": snap_tags(data.get("category"), CATEGORIES),
-        "industry": snap_tags(data.get("industry"), INDUSTRIES) or ["General Manufacturing"],
+        "category": snap_tags(data.get("category"), CATEGORIES, aliases=CATEGORY_ALIASES),
+        "industry": (snap_tags(data.get("industry"), INDUSTRIES, limit=2,
+                                   aliases=INDUSTRY_ALIASES) or ["General Manufacturing"]),
         # Default to the most conservative reading when the model omits or garbles it.
         "stage": stage[0] if stage else "Announced",
     }

@@ -112,9 +112,15 @@ zero is visible at a glance.
 
 ## 🏷️ Tag hygiene
 
-`Category` and `Industry` are restricted to the controlled vocabularies defined at the top of
-`app.py`. The model is instructed to pick from those lists, and `snap_tags()` maps anything
-off-list onto the nearest canonical term (or drops it).
+`Category` and `Industry` are restricted to short controlled vocabularies defined at the top
+of `app.py` — **11 categories and 13 industries**. The model picks from those lists, and
+`snap_tags()` folds anything off-list onto the right one via `CATEGORY_ALIASES` /
+`INDUSTRY_ALIASES`, or drops it.
+
+The lists are deliberately short and describe what the AI is *for*, not which technique it
+uses — the technique belongs in the `AI Solution` text, where it can be stated precisely. A
+long list fragments the table: when three tags are all plausible for one article, no two rows
+tag alike and filtering by Category stops meaning anything.
 
 This exists because free-form tagging had grown the database to 65 `Category` and 51
 `Industry` options full of near-duplicates — `predictive_maintenance` vs
