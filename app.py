@@ -507,6 +507,8 @@ Skip the article — return {{"skip": true, "reason": "..."}} — if ANY of thes
 
 Judge substance, not tense. "Will deploy", "is piloting" and "has launched" all qualify when the mechanism is explained. A vendor explainer qualifies if it describes a real system at a named organisation. Reject vagueness, not the future.
 
+Industrial robotics, cobots, vision systems and automation platforms COUNT for this database, even where the article names no specific machine-learning technique — the categories below include Robotics, Collaborative Robotics and Process Automation. A named manufacturer putting a fleet of cobots into its plants is exactly what belongs here. Do not require the word "AI" to appear.
+
 Otherwise return:
 {{
   "problem": "The specific operational problem, in 2-3 sentences. Name the company/plant and include concrete details from the article — the defect rate, downtime hours, cycle time, headcount, cost, or scale involved. State the stage plainly if it is not yet in production, e.g. 'currently in pilot at...', 'shipping in 2027'. Do NOT write generic statements like 'manufacturers face quality challenges'.",
@@ -536,7 +538,9 @@ ARTICLE:
         log("   ↳ skipped: model returned no parseable JSON")
         return None
     if data.get("skip"):
-        log(f"   ↳ skipped: {str(data.get('reason', 'not a use case'))[:90]}")
+        # Logged generously: a truncated reason hid why a 58-cobot deployment was rejected,
+        # which is the one thing needed to tell a correct skip from a bad one.
+        log(f"   ↳ skipped: {str(data.get('reason', 'not a use case'))[:300]}")
         return None
 
     problem = str(data.get("problem", "")).strip()
